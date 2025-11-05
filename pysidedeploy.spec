@@ -40,7 +40,7 @@ qml_files =
 excluded_qml_plugins = 
 
 # qt modules used. comma separated
-modules = Widgets,Network,Core,Gui
+modules = Widgets,Network,Gui,Core
 
 # qt plugins used by the application
 plugins = networkaccess,tls,styles,platforms,platforms/darwin,platforminputcontexts,generic,platformthemes,networkinformation,accessiblebridge,egldeviceintegrations,iconengines,imageformats,xcbglintegrations
@@ -64,10 +64,14 @@ plugins =
 macos.permissions = 
 
 # mode of using nuitka. accepts standalone or onefile. default is onefile.
-mode = standalone
+mode = onefile
 
 # (str) specify any extra nuitka arguments
-extra_args = --quiet --noinclude-qt-translations --windows-console-mode=disable
+extra_args = --quiet --noinclude-qt-translations --windows-console-mode=disable ^
+	--product-name="Toast App" ^
+	--file-version="0.1.0" ^
+	--product-version="0.1.0" ^
+	--copyright="Copyright KEN 2025"
 
 [buildozer]
 
