@@ -18,7 +18,6 @@ ui_langs = sys_locale.uiLanguages()
 if any(ls.lower().startswith("zh") for ls in ui_langs):
     LANG = "zh"
 
-
 STRINGS = {
     "default_title": {"en": "Default Notification", "zh": "默认通知"},
     "default_message": {"en": "This is a test message", "zh": "这是一个测试消息"},
@@ -159,9 +158,12 @@ class Toast(QtWidgets.QFrame):
         )
         layout.addWidget(self.countdown_lbl)
 
-        # 最小尺寸更贴合内容
-        self.setMinimumWidth(320)
-        self.setMinimumHeight(100)
+        # 最小尺寸设置：只固定宽度，高度交给布局自适应
+        # self.setMinimumWidth(320)
+        # self.setSizePolicy(
+        #     QtWidgets.QSizePolicy.Preferred,
+        #     QtWidgets.QSizePolicy.MinimumExpanding
+        # )
 
         # 自动关闭
         QtCore.QTimer.singleShot(self.duration, self.fade_out)
@@ -301,10 +303,42 @@ class ToastContainer(QtWidgets.QWidget):
         self.show()
 
     def add_toast(self, toast):
-        # 新 toast 插在 stretch 之前（从上往下堆叠）
+        # 插入布局
         self.vbox.insertWidget(self.vbox.count() - 1, toast)
-        toast.show()
+
+        # 先不立即 show，而是延迟到布局稳定后再 show
+        def _start_animation():
+            toast.show()
+            toast.setWindowOpacity(0.0)
+
+            start_geo = toast.geometry()
+            end_geo = toast.geometry()
+            start_geo.moveTop(start_geo.top() - 20)
+
+            anim_group = QtCore.QParallelAnimationGroup(toast)
+
+            fade_anim = QtCore.QPropertyAnimation(toast, b"windowOpacity", toast)
+            fade_anim.setDuration(250)
+            fade_anim.setStartValue(0.0)
+            fade_anim.setEndValue(1.0)
+            fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+            slide_anim = QtCore.QPropertyAnimation(toast, b"geometry", toast)
+            slide_anim.setDuration(250)
+            slide_anim.setStartValue(start_geo)
+            slide_anim.setEndValue(end_geo)
+            slide_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+            anim_group.addAnimation(fade_anim)
+            anim_group.addAnimation(slide_anim)
+            anim_group.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+        # 先调整容器高度，确保滚动条状态正确
         self.adjust_height()
+
+        # 延迟到下一个事件循环再启动动画，避免重叠
+        QtWidgets.QApplication.processEvents()  # 强制刷新布局
+        QtCore.QTimer.singleShot(0, _start_animation)
 
     def remove_toast(self, toast):
         self.vbox.removeWidget(toast)
@@ -312,58 +346,39 @@ class ToastContainer(QtWidgets.QWidget):
         self.adjust_height()
 
     def adjust_height(self):
-        # 统计所有 toast 的高度
-        count = self.vbox.count() - 1
-        total_height = 0
-        for i in range(count):
-            w = self.vbox.itemAt(i).widget()
-            if w:
-                total_height += max(w.sizeHint().height(), w.minimumHeight())
-
-        if count > 1:
-            total_height += (count - 1) * self.vbox.spacing()
-
-        toolbar_h = self.pin_btn.sizeHint().height() + 12
-        total_height += toolbar_h
-
-        # 给 max_height 预留安全余量
+        # 固定容器高度，不再随内容动态变化
         safe_max = self.max_height - 20
-        new_height = min(total_height, safe_max)
-        new_height = new_height if new_height >= 170 else 170
+        fixed_height = safe_max
 
         # 固定顶边位置（右上角）
         x = self.screen.right() - self.width - self.margin
         y = self.screen.top() + self.margin
 
-        self.setMinimumHeight(new_height)
-        self.setMaximumHeight(new_height)
-        self.setGeometry(x, y, self.width, new_height)
+        # 直接固定容器大小和位置
+        self.resize(self.width, fixed_height)
+        self.move(x, y)
 
-        # 滚动逻辑
-        if total_height > safe_max:
-            if not self.scroll:
-                self.root.removeWidget(self.container)
-                self.scroll = QtWidgets.QScrollArea()
-                self.scroll.setWidgetResizable(True)
-                self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-                self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-                self.scroll.setWidget(self.container)
-                self.root.addWidget(self.scroll)
-                # 🔑 关键：强制 scroll 匹配容器宽度
-                self.scroll.setMinimumWidth(self.width)
-                self.scroll.setMaximumWidth(self.width)
+        # 始终使用滚动区域来容纳 toast
+        if not self.scroll:
+            self.root.removeWidget(self.container)
+            self.scroll = QtWidgets.QScrollArea()
+            self.scroll.setWidgetResizable(True)
+            self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.scroll.setWidget(self.container)
+            self.root.addWidget(self.scroll)
+            # 🔑 强制 scroll 匹配容器宽度
+            self.scroll.setMinimumWidth(self.width)
+            self.scroll.setMaximumWidth(self.width)
 
-            self.scroll.setMinimumHeight(new_height - toolbar_h)
-            self.scroll.setMaximumHeight(new_height - toolbar_h)
-        else:
-            if self.scroll:
-                self.root.removeWidget(self.scroll)
-                self.scroll.deleteLater()
-                self.scroll = None
-                self.root.addWidget(self.container)
-            self.container.setMinimumHeight(new_height - toolbar_h)
+            scrollbar_w = self.scroll.verticalScrollBar().sizeHint().width()
+            self.scroll.setFixedWidth(self.width + scrollbar_w)
+            self.container.setFixedWidth(self.width)
 
-        # self.adjustSize()
+        # 工具栏高度
+        toolbar_h = self.pin_btn.sizeHint().height() + 12
+        self.scroll.setMinimumHeight(fixed_height - toolbar_h)
+        self.scroll.setMaximumHeight(fixed_height - toolbar_h)
 
     def _apply_toolbar_style(self):
         if self.theme == "light":
