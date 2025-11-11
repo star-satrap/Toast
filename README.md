@@ -1,5 +1,3 @@
-# Toast Notification App (中英文双语版)
-
 # Toast Notification Program /  Toast通知程序
 
 A cross-platform toast notification application built with PySide6, supporting custom messages, themes, and multi-language (English/Chinese) display. 
