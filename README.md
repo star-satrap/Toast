@@ -2,9 +2,9 @@
 
 # Toast Notification Program /  Toast通知程序
 
+A cross-platform toast notification application built with PySide6, supporting custom messages, themes, and multi-language (English/Chinese) display. 
 
-
-A cross-platform toast notification application built with PySide6, supporting custom messages, themes, and multi-language (English/Chinese) display. / 一款基于PySide6开发的跨平台Toast通知应用，支持自定义消息、主题切换及多语言（中英）显示。
+一款基于PySide6开发的跨平台Toast通知应用，支持自定义消息、主题切换及多语言（中英）显示。
 
 
 
@@ -121,26 +121,35 @@ python toast.py --keep-alive
 
 
 
-- **Auto Language Detection / 自动语言检测**: Automatically switches between English and Chinese based on system UI language / 根据系统UI语言自动切换中英文显示
+- **Auto Language Detection / 自动语言检测**:
+    
+    - Automatically switches between English and Chinese based on system UI language / 根据系统UI语言自动切换中英文显示
 
 - **Themes / 主题**: 
 
-- Dark theme (default): Dark background with white text / 深色主题（默认）：深色背景配白色文字
+    - **Dark theme (default)**: Dark background with white text / 深色主题（默认）：深色背景配白色文字
 
-- Light theme: Light background with black text / 浅色主题：浅色背景配黑色文字
+    - **Light theme**: Light background with black text / 浅色主题：浅色背景配黑色文字
 
-**Pinning / 置顶功能**: Click the 📌 button to toggle "stay on top" functionality / 点击📌按钮切换通知"置顶"状态
+- **Pinning / 置顶功能**:
 
-**Close All / 全部关闭**: Click the ❌ button to close all notifications and exit / 点击❌按钮关闭所有通知并退出程序
+    - Click the 📌 button to toggle "stay on top" functionality / 点击📌按钮切换通知"置顶"状态
 
-**Fade Animations / 淡入淡出动画**: Smooth fade in/out effects for better user experience / 流畅的淡入淡出效果，提升用户体验
+- **Close All / 全部关闭**:
 
-**Local Server / 本地服务器**: Automatically starts a local server to handle multiple notification requests without restarting / 自动启动本地服务器，无需重启即可处理多个通知请求
+    - Click the ❌ button to close all notifications and exit / 点击❌按钮关闭所有通知并退出程序
+
+- **Fade Animations / 淡入淡出动画**:
+
+    - Smooth fade in/out effects for better user experience / 流畅的淡入淡出效果，提升用户体验
+
+- **Local Server / 本地服务器**:
+
+    - Automatically starts a local server to handle multiple notification requests without restarting / 自动启动本地服务器，无需重启即可处理多个通知请求
 
 
 
 ## Deployment / 部署方法
-
 
 
 You can deploy the application using pyside6-deploy: / 可使用pyside6-deploy工具进行应用部署：
