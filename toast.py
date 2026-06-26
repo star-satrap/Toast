@@ -2,14 +2,11 @@ import argparse
 import json
 import sys
 import time
+from functools import cmp_to_key
 
 from PySide6 import QtCore, QtWidgets, QtGui, QtNetwork
 # ========== 内置多语言支持 ==========
 from PySide6.QtCore import QLocale
-
-# 新建项目环境改用：
-# uv venv --seed
-# --seed 参数会自动预装 pip、setuptools，后续 pyside6-deploy、pyinstaller 这类打包工具就不会缺 pip。
 
 # pyside6 版本： pip install pyside6==6.7.3 | 6.7.3版本适用于Windows Server 2016
 # 部署命令 pyside6-deploy .\toast.py
@@ -37,6 +34,7 @@ STRINGS = {
     "hours": {"en": "h ", "zh": "小时"},
     "minutes": {"en": "m ", "zh": "分钟"},
     "seconds": {"en": "s", "zh": "秒钟"},
+    "expired_label": {"en": "Expired", "zh": "已过期"},
 }
 
 
@@ -180,6 +178,7 @@ class LedPinButton(ToolButton):
 # ========== 单个通知 ==========
 class Toast(QtWidgets.QFrame):
     closed = QtCore.Signal(object)
+    remaining_changed = QtCore.Signal()
 
     def __init__(self, title, message, duration=3000, show_countdown=False, theme="dark"):
         super().__init__()
@@ -187,16 +186,28 @@ class Toast(QtWidgets.QFrame):
         self.duration = duration
         self.remaining = max(1, duration // 1000)
         self.show_countdown = show_countdown
+        self.theme = theme
         self._fade_anim = None
+        self._exit_anim = None
+
+        # 到期缓冲：两阶段生命周期
+        self.phase = "active"          # "active" | "expired"
+        self.expired_time = None       # 进入过期阶段的时间戳
+        self._insert_order = 0         # 插入顺序（用于无倒计时排序）
+
         # 右滑关闭手势状态（Windows 平板触摸适配）
         self._drag = None
         self._slide_back_anim = None
-        self._swipe_threshold = 0.5      # 松手时位移需达到卡片宽度的 50%
-        self._fling_velocity = 600.0    # px/s，快速右滑判定阈值
+        self._swipe_threshold = 0.5
+        self._fling_velocity = 600.0
+
+        # 动画状态标记
+        self._exiting = False
+        self._entering = False
 
         # 主题样式搭配（字体 12pt → 10pt，圆角 12px → 10px）
         if theme == "light":
-            style = """
+            self._base_style = """
                 #toast {
                     background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
                         stop:0 rgba(255,255,255,220), stop:1 rgba(240,240,240,180));
@@ -205,9 +216,18 @@ class Toast(QtWidgets.QFrame):
                 }
                 QLabel { color: black; font-size: 10pt; background: transparent; }
             """
+            self._expired_style = """
+                #toast {
+                    background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                        stop:0 rgba(255,255,255,220), stop:1 rgba(240,240,240,180));
+                    border-radius: 10px;
+                    border: 1px solid rgba(255,140,0,200);
+                }
+                QLabel { color: black; font-size: 10pt; background: transparent; }
+            """
             countdown_color = "blue"
         else:
-            style = """
+            self._base_style = """
                 #toast {
                     background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
                         stop:0 rgba(40,40,40,220), stop:1 rgba(20,20,20,180));
@@ -216,18 +236,27 @@ class Toast(QtWidgets.QFrame):
                 }
                 QLabel { color: white; font-size: 10pt; background: transparent; }
             """
+            self._expired_style = """
+                #toast {
+                    background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                        stop:0 rgba(40,40,40,220), stop:1 rgba(20,20,20,180));
+                    border-radius: 10px;
+                    border: 1px solid rgba(255,165,0,180);
+                }
+                QLabel { color: white; font-size: 10pt; background: transparent; }
+            """
             countdown_color = "yellow"
 
-        self.setStyleSheet(style)
+        self.setStyleSheet(self._base_style)
 
-        # 阴影（blur 30→20, offset 6→4 等比缩减）
+        # 阴影
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
         shadow.setOffset(0, 4)
         shadow.setColor(QtGui.QColor(0, 0, 0, 180))
         self.setGraphicsEffect(shadow)
 
-        # 布局（margins 12,8,12,12 → 8,5,8,8，spacing 6→4）
+        # 布局
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 5, 8, 8)
         layout.setSpacing(4)
@@ -260,32 +289,45 @@ class Toast(QtWidgets.QFrame):
         msg_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.countdown_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # 自动关闭
-        QtCore.QTimer.singleShot(self.duration, self.fade_out)
-
-        # 倒计时更新
+        # 生命周期管理
         if self.show_countdown:
+            # 倒计时 toast：tick 驱动生命周期
             self._update_countdown()
             self._timer = QtCore.QTimer(self)
             self._timer.timeout.connect(self._tick)
             self._timer.start(1000)
+        else:
+            # 非倒计时 toast：duration 到期直接出场
+            QtCore.QTimer.singleShot(self.duration, self.start_exit_anim)
 
     def showEvent(self, event):
         super().showEvent(event)
-        # 稳定淡入（持有引用，避免被回收），目标为 TOAST_OPACITY
+        # 入场动画由容器 add_toast 驱动，这里仅设置初始透明度
         self.setWindowOpacity(0)
-        self._fade_anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_anim.setDuration(250)
-        self._fade_anim.setStartValue(0)
-        self._fade_anim.setEndValue(TOAST_OPACITY)
-        self._fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        self._fade_anim.start()
 
+    # ========== 倒计时与到期缓冲 ==========
     def _tick(self):
+        if self.phase != "active":
+            return
         self.remaining -= 1
-        if self.remaining <= 0 and hasattr(self, "_timer"):
+        if self.remaining <= 0:
+            self._enter_expired_phase()
+        else:
+            self._update_countdown()
+            self.remaining_changed.emit()
+
+    def _enter_expired_phase(self):
+        """进入已过期阶段"""
+        self.phase = "expired"
+        self.expired_time = time.time()
+        if hasattr(self, "_timer"):
             self._timer.stop()
-        self._update_countdown()
+        # 视觉变化
+        self.countdown_lbl.setText(tr("expired_label"))
+        self.setStyleSheet(self._expired_style)
+        # 5 秒后自动出场
+        QtCore.QTimer.singleShot(5000, self.start_exit_anim)
+        self.remaining_changed.emit()
 
     def _update_countdown(self):
         sec = max(0, self.remaining)
@@ -302,17 +344,45 @@ class Toast(QtWidgets.QFrame):
         parts.append(f"{sec}{tr('seconds')}")
         self.countdown_lbl.setText(tr("countdown_prefix") + "".join(parts))
 
+    # ========== 统一出场动画（右滑 + 淡出） ==========
     def _manual_close(self):
-        self.fade_out()
+        self.start_exit_anim()
 
-    def fade_out(self):
-        self._fade_anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_anim.setDuration(200)
-        self._fade_anim.setStartValue(TOAST_OPACITY)
-        self._fade_anim.setEndValue(0)
-        self._fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
-        self._fade_anim.finished.connect(self._final_close)
-        self._fade_anim.start()
+    def start_exit_anim(self):
+        if self._exiting:
+            return
+        self._exiting = True
+
+        # 记录当前几何，从布局中移除以避免动画冲突
+        current_geo = QtCore.QRect(self.geometry())
+        parent = self.parent()
+        if parent and parent.layout():
+            parent.layout().removeWidget(self)
+        self.setGeometry(current_geo)
+
+        # 终止位置：向右偏移自身宽度
+        exit_geo = QtCore.QRect(current_geo)
+        exit_geo.moveLeft(exit_geo.left() + self.width())
+
+        anim_group = QtCore.QParallelAnimationGroup(self)
+
+        fade_anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
+        fade_anim.setDuration(150)
+        fade_anim.setStartValue(self.windowOpacity())
+        fade_anim.setEndValue(0)
+        fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+        slide_anim = QtCore.QPropertyAnimation(self, b"geometry", self)
+        slide_anim.setDuration(150)
+        slide_anim.setStartValue(current_geo)
+        slide_anim.setEndValue(exit_geo)
+        slide_anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+
+        anim_group.addAnimation(fade_anim)
+        anim_group.addAnimation(slide_anim)
+        anim_group.finished.connect(self._final_close)
+        anim_group.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._exit_anim = anim_group
 
     def _final_close(self):
         self.closed.emit(self)
@@ -336,12 +406,10 @@ class Toast(QtWidgets.QFrame):
         if self._drag:
             gp = event.globalPosition().toPoint()
             delta = gp - self._drag["start_global"]
-            # 仅向右跟手（左滑钳制为 0），垂直保持不变
             dx = max(0, delta.x())
             if dx > 2:
                 self._drag["moved"] = True
             self.setGeometry(self._drag["origin_geo"].translated(dx, 0))
-            # 瞬时速度（px/s），指数平滑去抖
             now = time.perf_counter()
             dt = now - self._drag["last_time"]
             if dt > 0:
@@ -357,12 +425,10 @@ class Toast(QtWidgets.QFrame):
             offset = self.geometry().x() - origin_x
             velocity = self._drag["velocity"]
             width = self.width() or 1
-            # 达到位移阈值，或快速右滑（fling）即触发关闭
             if offset >= width * self._swipe_threshold or velocity >= self._fling_velocity:
                 self._drag = None
-                self.fade_out()
+                self.start_exit_anim()
                 return
-            # 否则回弹到原位
             self._animate_back_to(self._drag["origin_geo"])
             self._drag = None
             return
@@ -389,11 +455,14 @@ class ToastContainer(QtWidgets.QWidget):
         self.margin = 50
         self.screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         self.max_height = self.screen.height() - 2 * self.margin
-        self.width = 300  # 380 → 300
+        self.width = 300
+
+        # 批量插入错峰计数
+        self._stagger_count = 0
+        self._insert_counter = 0
 
         # 初始位置（靠右上）
         init_h = 120
-
         self.setGeometry(
             self.screen.right() - self.width - self.margin,
             self.screen.top() + self.margin,
@@ -401,7 +470,7 @@ class ToastContainer(QtWidgets.QWidget):
             init_h
         )
 
-        # 顶部工具栏（margins 6,6,6,4 → 4,4,4,3，spacing 6→4）
+        # 顶部工具栏
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.setContentsMargins(4, 4, 4, 3)
         toolbar.setSpacing(4)
@@ -418,25 +487,24 @@ class ToastContainer(QtWidgets.QWidget):
         toolbar.addWidget(self.close_all_btn)
         toolbar.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
-        # 先创建 container（margins 8,6,8,8 → 6,4,6,6，spacing 10→6）
+        # container
         self.container = QtWidgets.QWidget()
         self.vbox = QtWidgets.QVBoxLayout(self.container)
         self.vbox.setContentsMargins(6, 4, 6, 6)
         self.vbox.setSpacing(6)
         self.vbox.addStretch()
 
-        # 再创建 root 布局（margins 6,6,6,6 → 4,4,4,4，spacing 4→3）
+        # root 布局
         self.root = QtWidgets.QVBoxLayout(self)
         self.root.setContentsMargins(4, 4, 4, 4)
         self.root.setSpacing(3)
         self.root.addLayout(toolbar)
         self.root.addWidget(self.container)
 
-        self.scroll = None  # 超出时才启用
+        self.scroll = None
         self.setStyleSheet("background: transparent; border-radius: 10px;")
 
         self.show()
-        # 统一半透明
         self.setWindowOpacity(TOAST_OPACITY)
 
     def toggle_pin(self):
@@ -451,66 +519,154 @@ class ToastContainer(QtWidgets.QWidget):
             self.pin_btn.setToolTip(tr("pin_tooltip_unpin"))
         self.setWindowFlags(flags)
         self.show()
-        # setWindowFlags 后 opacity 会重置，需重新设置
         self.setWindowOpacity(TOAST_OPACITY)
 
     def add_toast(self, toast):
-        # 插入布局
-        self.vbox.insertWidget(self.vbox.count() - 1, toast)
+        # 设置插入顺序
+        toast._insert_order = self._insert_counter
+        self._insert_counter += 1
 
-        # 先不立即 show，而是延迟到布局稳定后再 show
-        def _start_animation():
+        # 智能插入位置：有倒计时 toast 找到第一个 remaining 更大的位置
+        insert_index = self.vbox.count() - 1  # 默认在 stretch 前面（末尾）
+        if toast.show_countdown and toast.phase == "active":
+            for i in range(self.vbox.count() - 1):
+                item = self.vbox.itemAt(i)
+                if item and item.widget():
+                    t = item.widget()
+                    if t.show_countdown and t.phase == "active" and t.remaining > toast.remaining:
+                        insert_index = i
+                        break
+        # 无倒计时 toast 始终插入到有倒计时 toast 之后（末尾）
+
+        self.vbox.insertWidget(insert_index, toast)
+
+        # 错峰延迟
+        self._stagger_count += 1
+        delay = (self._stagger_count - 1) * 60
+
+        def _start_entry_anim():
+            # 动画开始后归零错峰计数
+            self._stagger_count = 0
+            toast._entering = True
             toast.show()
             toast.setWindowOpacity(0.0)
 
-            start_geo = toast.geometry()
-            end_geo = toast.geometry()
-            start_geo.moveTop(start_geo.top() - 20)
+            end_geo = QtCore.QRect(toast.geometry())
+            start_geo = QtCore.QRect(end_geo)
+            start_geo.moveLeft(start_geo.left() + toast.width())  # 从右侧滑入
 
             anim_group = QtCore.QParallelAnimationGroup(toast)
 
             fade_anim = QtCore.QPropertyAnimation(toast, b"windowOpacity", toast)
-            fade_anim.setDuration(250)
+            fade_anim.setDuration(200)
             fade_anim.setStartValue(0.0)
             fade_anim.setEndValue(TOAST_OPACITY)
             fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
             slide_anim = QtCore.QPropertyAnimation(toast, b"geometry", toast)
-            slide_anim.setDuration(250)
+            slide_anim.setDuration(200)
             slide_anim.setStartValue(start_geo)
             slide_anim.setEndValue(end_geo)
             slide_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
             anim_group.addAnimation(fade_anim)
             anim_group.addAnimation(slide_anim)
+            anim_group.finished.connect(lambda: setattr(toast, '_entering', False))
             anim_group.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            toast._fade_anim = anim_group
 
-        # 先调整容器高度，确保滚动条状态正确
         self.adjust_height()
+        QtWidgets.QApplication.processEvents()
+        QtCore.QTimer.singleShot(delay, _start_entry_anim)
 
-        # 延迟到下一个事件循环再启动动画，避免重叠
-        QtWidgets.QApplication.processEvents()  # 强制刷新布局
-        QtCore.QTimer.singleShot(0, _start_animation)
+        # 入场后触发排序（延迟到入场动画启动后）
+        QtCore.QTimer.singleShot(delay + 50, self.reorder_toasts)
 
     def remove_toast(self, toast):
         self.vbox.removeWidget(toast)
         toast.setParent(None)
         self.adjust_height()
 
+    # ========== 倒计时动态排序 ==========
+    def reorder_toasts(self):
+        # 收集非退出、非入场中的 toast（跳过 stretch）
+        toasts = []
+        for i in range(self.vbox.count() - 1):
+            item = self.vbox.itemAt(i)
+            if item and item.widget():
+                t = item.widget()
+                if not getattr(t, '_exiting', False) and not getattr(t, '_entering', False):
+                    toasts.append(t)
+
+        if len(toasts) <= 1:
+            return
+
+        # 记录重排前的几何
+        old_geos = {id(t): QtCore.QRect(t.geometry()) for t in toasts}
+
+        # 排序
+        sorted_toasts = self._sort_toasts(toasts)
+
+        # 检查顺序是否变化
+        if sorted_toasts == toasts:
+            return
+
+        # 从布局中移除并重新插入
+        for t in sorted_toasts:
+            self.vbox.removeWidget(t)
+        for t in sorted_toasts:
+            self.vbox.insertWidget(self.vbox.count() - 1, t)
+
+        QtWidgets.QApplication.processEvents()
+
+        # 对位置变化的 toast 做滑动过渡动画
+        for t in sorted_toasts:
+            old = old_geos.get(id(t))
+            new = t.geometry()
+            if old and old != new:
+                t.setGeometry(old)  # 先回到旧位置
+                anim = QtCore.QPropertyAnimation(t, b"geometry", t)
+                anim.setDuration(200)
+                anim.setStartValue(old)
+                anim.setEndValue(QtCore.QRect(new))
+                anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+                anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+                t._reorder_anim = anim
+
+    def _sort_toasts(self, toasts):
+        """排序规则：EXPIRED 最上 → ACTIVE 有倒计时(remaining升序) → ACTIVE 无倒计时(插入倒序)"""
+        expired = [t for t in toasts if t.phase == "expired"]
+        active_cd = [t for t in toasts if t.phase == "active" and t.show_countdown]
+        active_no = [t for t in toasts if t.phase == "active" and not t.show_countdown]
+
+        # 已过期：按进入过期阶段的时间升序（最早过期在最上）
+        expired.sort(key=lambda t: t.expired_time or 0)
+
+        # 有倒计时：按 remaining 升序，5 秒防抖（差值 < 5 秒保持原序）
+        active_cd.sort(key=cmp_to_key(self._compare_countdown))
+
+        # 无倒计时：按插入时间倒序（最新在上）
+        active_no.sort(key=lambda t: -getattr(t, '_insert_order', 0))
+
+        return expired + active_cd + active_no
+
+    def _compare_countdown(self, a, b):
+        """比较两个有倒计时的 toast，差值 < 5 秒则保持原序"""
+        diff = a.remaining - b.remaining
+        if abs(diff) >= 5:
+            return diff  # remaining 小的排前面
+        return 0  # 保持原有相对顺序（stable sort）
+
     def adjust_height(self):
-        # 固定容器高度，不再随内容动态变化
         safe_max = self.max_height - 20
         fixed_height = safe_max
 
-        # 固定顶边位置（右上角）
         x = self.screen.right() - self.width - self.margin
         y = self.screen.top() + self.margin
 
-        # 直接固定容器大小和位置
         self.resize(self.width, fixed_height)
         self.move(x, y)
 
-        # 始终使用滚动区域来容纳 toast
         if not self.scroll:
             self.root.removeWidget(self.container)
             self.scroll = QtWidgets.QScrollArea()
@@ -519,7 +675,6 @@ class ToastContainer(QtWidgets.QWidget):
             self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.scroll.setWidget(self.container)
             self.root.addWidget(self.scroll)
-            # 强制 scroll 匹配容器宽度
             self.scroll.setMinimumWidth(self.width)
             self.scroll.setMaximumWidth(self.width)
 
@@ -527,7 +682,6 @@ class ToastContainer(QtWidgets.QWidget):
             self.scroll.setFixedWidth(self.width + scrollbar_w)
             self.container.setFixedWidth(self.width)
 
-        # 工具栏高度（按钮更小，余量 12→8）
         toolbar_h = self.pin_btn.sizeHint().height() + 8
         self.scroll.setMinimumHeight(fixed_height - toolbar_h)
         self.scroll.setMaximumHeight(fixed_height - toolbar_h)
@@ -547,6 +701,7 @@ class ToastManager(QtCore.QObject):
         try:
             toast = Toast(title, message, duration, show_countdown, theme=self.theme)
             toast.closed.connect(self._on_closed)
+            toast.remaining_changed.connect(self._on_remaining_changed)
             self.toasts.append(toast)
             self.container.add_toast(toast)
         except Exception as e:
@@ -558,6 +713,9 @@ class ToastManager(QtCore.QObject):
             self.container.remove_toast(toast)
             if not self.toasts:
                 self.all_closed.emit()
+
+    def _on_remaining_changed(self):
+        self.container.reorder_toasts()
 
 
 # ========== 本地服务端 ==========
@@ -633,7 +791,6 @@ def main():
 
     args = parser.parse_args()
 
-    # 构造 payload
     payload = {
         "title": args.title,
         "message": args.message,
@@ -642,7 +799,6 @@ def main():
         "theme": args.theme,
     }
 
-    # 如已有实例 → 发消息后退出
     app = QtWidgets.QApplication(sys.argv)
 
     QtWidgets.QToolTip.setFont(QtGui.QFont("Microsoft YaHei", 9))
@@ -658,7 +814,6 @@ def main():
     if send_message(payload):
         return
 
-    # 新实例作为服务端
     mgr = ToastManager(theme=args.theme)
     srv = LocalServer()
     srv.message.connect(lambda p: mgr.show_toast(
@@ -671,7 +826,6 @@ def main():
     if not args.keep_alive:
         mgr.all_closed.connect(app.quit)
 
-    # 启动时至少显示一个 toast
     mgr.show_toast(payload["title"], payload["message"],
                    payload["duration"], payload["show_countdown"])
 
