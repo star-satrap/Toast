@@ -760,6 +760,7 @@ class ToastContainer(QtWidgets.QWidget):
         # 到期列表状态
         self._history_expanded = False
         self.history_panel = None
+        self.history_btn = None  # 防御性初始化（no_expired_history=True 时不创建按钮）
         self._height_anim = None  # 容器高度过渡动画
 
         # 初始位置（靠右上）
