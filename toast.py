@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import time
 
 from PySide6 import QtCore, QtWidgets, QtGui, QtNetwork
 # ========== 内置多语言支持 ==========
@@ -8,6 +9,9 @@ from PySide6.QtCore import QLocale
 
 # pyside6 版本： pip install pyside6==6.7.3 | 6.7.3版本适用于Windows Server 2016
 # 部署命令 pyside6-deploy .\toast.py
+
+# ========== 全局配置 ==========
+TOAST_OPACITY = 0.88  # 统一透明度控制（0.85 ~ 0.9）
 
 # 支持的语言
 LANG = "en"
@@ -36,6 +40,139 @@ def tr(key: str) -> str:
     return STRINGS.get(key, {}).get(LANG, key)
 
 
+# ========== 自定义按钮基类 ==========
+class ToolButton(QtWidgets.QToolButton):
+    """带 tooltip 提示的基础按钮"""
+    def enterEvent(self, event):
+        if self.toolTip():
+            QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self.toolTip(), self)
+        super().enterEvent(event)
+
+
+# ========== Windows 原生风格关闭按钮 ==========
+class CloseButton(ToolButton):
+    """红色背景 + 白色 ✕，hover 时加深，使用 QPainter 自绘"""
+    def __init__(self, theme="dark"):
+        super().__init__()
+        self.theme = theme
+        self.setMinimumSize(22, 22)
+        self.setMaximumSize(22, 22)
+        self._hovered = False
+        self._pressed = False
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._pressed = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self._pressed = True
+        self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pressed = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+
+        # 背景色：默认红 → hover 加深 → pressed 更深
+        if self._pressed:
+            color = QtGui.QColor(180, 10, 25)
+        elif self._hovered:
+            color = QtGui.QColor(232, 17, 35)
+        else:
+            color = QtGui.QColor(200, 35, 45)
+        painter.setBrush(color)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, 4, 4)
+
+        # 白色 ✕
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255), 1.5)
+        painter.setPen(pen)
+        m = 6
+        painter.drawLine(rect.left() + m, rect.top() + m,
+                         rect.right() - m, rect.bottom() - m)
+        painter.drawLine(rect.right() - m, rect.top() + m,
+                         rect.left() + m, rect.bottom() - m)
+
+
+# ========== LED 信号灯置顶按钮 ==========
+class LedPinButton(ToolButton):
+    """圆形 LED 指示灯：置顶时绿色亮起（带发光），取消置顶时灰色熄灭"""
+    def __init__(self, theme="dark"):
+        super().__init__()
+        self.theme = theme
+        self.pinned = True
+        self.setMinimumSize(22, 22)
+        self.setMaximumSize(22, 22)
+        self._hovered = False
+
+    def set_pinned(self, pinned):
+        self.pinned = pinned
+        self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        cx = rect.width() / 2
+        cy = rect.height() / 2
+        radius = min(rect.width(), rect.height()) / 2 - 3
+
+        # 外发光（仅亮起时）
+        if self.pinned:
+            glow = QtGui.QRadialGradient(cx, cy, radius * 2)
+            glow.setColorAt(0, QtGui.QColor(0, 255, 0, 60))
+            glow.setColorAt(1, QtGui.QColor(0, 255, 0, 0))
+            painter.setBrush(glow)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawEllipse(QtCore.QPointF(cx, cy), radius * 2, radius * 2)
+
+        # LED 主体：径向渐变模拟立体感
+        gradient = QtGui.QRadialGradient(
+            cx - radius * 0.3, cy - radius * 0.3, radius * 1.2
+        )
+        if self.pinned:
+            gradient.setColorAt(0, QtGui.QColor(120, 255, 120))
+            gradient.setColorAt(0.6, QtGui.QColor(0, 200, 0))
+            gradient.setColorAt(1, QtGui.QColor(0, 100, 0))
+        else:
+            gradient.setColorAt(0, QtGui.QColor(150, 150, 150))
+            gradient.setColorAt(0.6, QtGui.QColor(100, 100, 100))
+            gradient.setColorAt(1, QtGui.QColor(50, 50, 50))
+
+        painter.setBrush(gradient)
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 100), 1))
+        painter.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
+
+        # hover 边框
+        if self._hovered:
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.setPen(QtGui.QPen(QtGui.QColor(0, 191, 255), 1.5))
+            painter.drawEllipse(QtCore.QPointF(cx, cy), radius + 2, radius + 2)
+
+
 # ========== 单个通知 ==========
 class Toast(QtWidgets.QFrame):
     closed = QtCore.Signal(object)
@@ -47,17 +184,22 @@ class Toast(QtWidgets.QFrame):
         self.remaining = max(1, duration // 1000)
         self.show_countdown = show_countdown
         self._fade_anim = None
+        # 右滑关闭手势状态（Windows 平板触摸适配）
+        self._drag = None
+        self._slide_back_anim = None
+        self._swipe_threshold = 0.5      # 松手时位移需达到卡片宽度的 50%
+        self._fling_velocity = 600.0    # px/s，快速右滑判定阈值
 
-        # 主题样式搭配
+        # 主题样式搭配（字体 12pt → 10pt，圆角 12px → 10px）
         if theme == "light":
             style = """
                 #toast {
                     background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
                         stop:0 rgba(255,255,255,220), stop:1 rgba(240,240,240,180));
-                    border-radius: 12px;
+                    border-radius: 10px;
                     border: 1px solid rgba(0,0,0,40);
                 }
-                QLabel { color: black; font-size: 12pt; background: transparent; }
+                QLabel { color: black; font-size: 10pt; background: transparent; }
             """
             countdown_color = "blue"
         else:
@@ -65,81 +207,32 @@ class Toast(QtWidgets.QFrame):
                 #toast {
                     background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
                         stop:0 rgba(40,40,40,220), stop:1 rgba(20,20,20,180));
-                    border-radius: 12px;
+                    border-radius: 10px;
                     border: 1px solid rgba(255,255,255,40);
                 }
-                QLabel { color: white; font-size: 12pt; background: transparent; }
+                QLabel { color: white; font-size: 10pt; background: transparent; }
             """
             countdown_color = "yellow"
 
         self.setStyleSheet(style)
 
-        # 阴影
+        # 阴影（blur 30→20, offset 6→4 等比缩减）
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(30)
-        shadow.setOffset(0, 6)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 4)
         shadow.setColor(QtGui.QColor(0, 0, 0, 180))
         self.setGraphicsEffect(shadow)
 
-        # 布局
+        # 布局（margins 12,8,12,12 → 8,5,8,8，spacing 6→4）
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 5, 8, 8)
+        layout.setSpacing(4)
 
         # 标题 + 关闭
         top_layout = QtWidgets.QHBoxLayout()
+        top_layout.setSpacing(4)
         title_lbl = QtWidgets.QLabel(f"<b>{title or tr('default_title')}</b>")
-        close_btn = QtWidgets.QToolButton()
-        close_btn.setText("×")
-        close_btn.setMinimumSize(28, 28)
-        if theme == "light":
-            close_btn.setStyleSheet("""
-                QToolButton {
-                    font-weight: bold;
-                    font-size: 16pt;
-                    /* default: no border, but keep space for radius */
-                    border: 2px solid transparent;
-                    border-radius: 6px;
-                    color: black;
-                    padding: 2px;              /* slightly tighter for icon */
-                    background: transparent;
-                }
-                QToolButton:hover {
-                    /* hover: bright blue edge + subtle blue wash */
-                    border: 2px solid #00BFFF;
-                    background: rgba(0, 191, 255, 30);
-                    color: red;                /* keep your existing red hover color */
-                }
-                QToolButton:pressed {
-                    /* pressed: orange edge + stronger wash */
-                    border: 2px solid #FF4500;
-                    background: rgba(255, 69, 0, 50);
-                    color: red;
-                }
-            """)
-        else:
-            close_btn.setStyleSheet("""
-                QToolButton {
-                    font-weight: bold;
-                    font-size: 16pt;
-                    border: 2px solid transparent;
-                    border-radius: 6px;
-                    color: white;
-                    padding: 2px;
-                    background: transparent;
-                }
-                QToolButton:hover {
-                    border: 2px solid #00BFFF;
-                    background: rgba(0, 191, 255, 40);  /* slightly stronger for dark bg */
-                    color: red;
-                }
-                QToolButton:pressed {
-                    border: 2px solid #FF4500;
-                    background: rgba(255, 69, 0, 60);
-                    color: red;
-                }
-            """)
-
+        close_btn = CloseButton(theme=theme)
         close_btn.clicked.connect(self._manual_close)
         top_layout.addWidget(title_lbl)
         top_layout.addStretch()
@@ -154,16 +247,14 @@ class Toast(QtWidgets.QFrame):
         # 倒计时
         self.countdown_lbl = QtWidgets.QLabel("")
         self.countdown_lbl.setStyleSheet(
-            f"color: {countdown_color}; font-weight: bold; background: transparent;"
+            f"color: {countdown_color}; font-weight: bold; font-size: 9pt; background: transparent;"
         )
         layout.addWidget(self.countdown_lbl)
 
-        # 最小尺寸设置：只固定宽度，高度交给布局自适应
-        # self.setMinimumWidth(320)
-        # self.setSizePolicy(
-        #     QtWidgets.QSizePolicy.Preferred,
-        #     QtWidgets.QSizePolicy.MinimumExpanding
-        # )
+        # 让标题/正文/倒计时区域鼠标事件穿透，使整张卡片可接收右滑手势
+        title_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        msg_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.countdown_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         # 自动关闭
         QtCore.QTimer.singleShot(self.duration, self.fade_out)
@@ -177,12 +268,12 @@ class Toast(QtWidgets.QFrame):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # 稳定淡入（持有引用，避免被回收）
+        # 稳定淡入（持有引用，避免被回收），目标为 TOAST_OPACITY
         self.setWindowOpacity(0)
         self._fade_anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
         self._fade_anim.setDuration(250)
         self._fade_anim.setStartValue(0)
-        self._fade_anim.setEndValue(1)
+        self._fade_anim.setEndValue(TOAST_OPACITY)
         self._fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         self._fade_anim.start()
 
@@ -213,7 +304,7 @@ class Toast(QtWidgets.QFrame):
     def fade_out(self):
         self._fade_anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
         self._fade_anim.setDuration(200)
-        self._fade_anim.setStartValue(1)
+        self._fade_anim.setStartValue(TOAST_OPACITY)
         self._fade_anim.setEndValue(0)
         self._fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
         self._fade_anim.finished.connect(self._final_close)
@@ -222,6 +313,65 @@ class Toast(QtWidgets.QFrame):
     def _final_close(self):
         self.closed.emit(self)
         self.deleteLater()
+
+    # ========== 右滑关闭手势（触摸跟手） ==========
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._drag is None:
+            gp = event.globalPosition().toPoint()
+            self._drag = {
+                "start_global": gp,
+                "origin_geo": self.geometry(),
+                "last_x": gp.x(),
+                "last_time": time.perf_counter(),
+                "velocity": 0.0,
+                "moved": False,
+            }
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag:
+            gp = event.globalPosition().toPoint()
+            delta = gp - self._drag["start_global"]
+            # 仅向右跟手（左滑钳制为 0），垂直保持不变
+            dx = max(0, delta.x())
+            if dx > 2:
+                self._drag["moved"] = True
+            self.setGeometry(self._drag["origin_geo"].translated(dx, 0))
+            # 瞬时速度（px/s），指数平滑去抖
+            now = time.perf_counter()
+            dt = now - self._drag["last_time"]
+            if dt > 0:
+                inst = (gp.x() - self._drag["last_x"]) / dt
+                self._drag["velocity"] = 0.6 * inst + 0.4 * self._drag["velocity"]
+            self._drag["last_time"] = now
+            self._drag["last_x"] = gp.x()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag and self._drag.get("moved"):
+            origin_x = self._drag["origin_geo"].x()
+            offset = self.geometry().x() - origin_x
+            velocity = self._drag["velocity"]
+            width = self.width() or 1
+            # 达到位移阈值，或快速右滑（fling）即触发关闭
+            if offset >= width * self._swipe_threshold or velocity >= self._fling_velocity:
+                self._drag = None
+                self.fade_out()
+                return
+            # 否则回弹到原位
+            self._animate_back_to(self._drag["origin_geo"])
+            self._drag = None
+            return
+        self._drag = None
+        super().mouseReleaseEvent(event)
+
+    def _animate_back_to(self, geo):
+        self._slide_back_anim = QtCore.QPropertyAnimation(self, b"geometry", self)
+        self._slide_back_anim.setDuration(200)
+        self._slide_back_anim.setStartValue(self.geometry())
+        self._slide_back_anim.setEndValue(geo)
+        self._slide_back_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._slide_back_anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
 
 # ========== 容器 ==========
@@ -235,10 +385,10 @@ class ToastContainer(QtWidgets.QWidget):
         self.margin = 50
         self.screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         self.max_height = self.screen.height() - 2 * self.margin
-        self.width = 380
+        self.width = 300  # 380 → 300
 
         # 初始位置（靠右上）
-        init_h = 140
+        init_h = 120
 
         self.setGeometry(
             self.screen.right() - self.width - self.margin,
@@ -247,20 +397,16 @@ class ToastContainer(QtWidgets.QWidget):
             init_h
         )
 
-        # 顶部工具栏
+        # 顶部工具栏（margins 6,6,6,4 → 4,4,4,3，spacing 6→4）
         toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setContentsMargins(6, 6, 6, 4)
-        toolbar.setSpacing(6)
+        toolbar.setContentsMargins(4, 4, 4, 3)
+        toolbar.setSpacing(4)
 
-        self.pin_btn = self.ToolButton()
-        self.pin_btn.setText("📌")
-        self.pin_btn.setMinimumSize(28, 28)
+        self.pin_btn = LedPinButton(theme=theme)
         self.pin_btn.setToolTip(tr("pin_tooltip_pin"))
         self.pin_btn.clicked.connect(self.toggle_pin)
 
-        self.close_all_btn = self.ToolButton()
-        self.close_all_btn.setText("❌")
-        self.close_all_btn.setMinimumSize(28, 28)
+        self.close_all_btn = CloseButton(theme=theme)
         self.close_all_btn.setToolTip(tr("close_all_tooltip"))
         self.close_all_btn.clicked.connect(QtWidgets.QApplication.quit)
 
@@ -268,39 +414,41 @@ class ToastContainer(QtWidgets.QWidget):
         toolbar.addWidget(self.close_all_btn)
         toolbar.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
-        # 先创建 container
+        # 先创建 container（margins 8,6,8,8 → 6,4,6,6，spacing 10→6）
         self.container = QtWidgets.QWidget()
         self.vbox = QtWidgets.QVBoxLayout(self.container)
-        self.vbox.setContentsMargins(8, 6, 8, 8)
-        self.vbox.setSpacing(10)
+        self.vbox.setContentsMargins(6, 4, 6, 6)
+        self.vbox.setSpacing(6)
         self.vbox.addStretch()
 
-        # 再创建 root 布局
+        # 再创建 root 布局（margins 6,6,6,6 → 4,4,4,4，spacing 4→3）
         self.root = QtWidgets.QVBoxLayout(self)
-        self.root.setContentsMargins(6, 6, 6, 6)
-        self.root.setSpacing(4)
+        self.root.setContentsMargins(4, 4, 4, 4)
+        self.root.setSpacing(3)
         self.root.addLayout(toolbar)
         self.root.addWidget(self.container)
 
         self.scroll = None  # 超出时才启用
-        self.setStyleSheet("background: transparent; border-radius: 12px;")
+        self.setStyleSheet("background: transparent; border-radius: 10px;")
 
-        # 初始化样式
-        self._apply_toolbar_style()
         self.show()
+        # 统一半透明
+        self.setWindowOpacity(TOAST_OPACITY)
 
     def toggle_pin(self):
         self.pinned = not self.pinned
         flags = QtCore.Qt.WindowType.Tool | QtCore.Qt.WindowType.FramelessWindowHint
         if self.pinned:
             flags |= QtCore.Qt.WindowType.WindowStaysOnTopHint
-            self.pin_btn.setText("📌")
+            self.pin_btn.set_pinned(True)
             self.pin_btn.setToolTip(tr("pin_tooltip_pin"))
         else:
-            self.pin_btn.setText("📍")
+            self.pin_btn.set_pinned(False)
             self.pin_btn.setToolTip(tr("pin_tooltip_unpin"))
         self.setWindowFlags(flags)
         self.show()
+        # setWindowFlags 后 opacity 会重置，需重新设置
+        self.setWindowOpacity(TOAST_OPACITY)
 
     def add_toast(self, toast):
         # 插入布局
@@ -320,7 +468,7 @@ class ToastContainer(QtWidgets.QWidget):
             fade_anim = QtCore.QPropertyAnimation(toast, b"windowOpacity", toast)
             fade_anim.setDuration(250)
             fade_anim.setStartValue(0.0)
-            fade_anim.setEndValue(1.0)
+            fade_anim.setEndValue(TOAST_OPACITY)
             fade_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
 
             slide_anim = QtCore.QPropertyAnimation(toast, b"geometry", toast)
@@ -367,7 +515,7 @@ class ToastContainer(QtWidgets.QWidget):
             self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.scroll.setWidget(self.container)
             self.root.addWidget(self.scroll)
-            # 🔑 强制 scroll 匹配容器宽度
+            # 强制 scroll 匹配容器宽度
             self.scroll.setMinimumWidth(self.width)
             self.scroll.setMaximumWidth(self.width)
 
@@ -375,43 +523,10 @@ class ToastContainer(QtWidgets.QWidget):
             self.scroll.setFixedWidth(self.width + scrollbar_w)
             self.container.setFixedWidth(self.width)
 
-        # 工具栏高度
-        toolbar_h = self.pin_btn.sizeHint().height() + 12
+        # 工具栏高度（按钮更小，余量 12→8）
+        toolbar_h = self.pin_btn.sizeHint().height() + 8
         self.scroll.setMinimumHeight(fixed_height - toolbar_h)
         self.scroll.setMaximumHeight(fixed_height - toolbar_h)
-
-    def _apply_toolbar_style(self):
-        if self.theme == "light":
-            base_color = "black"
-        else:
-            base_color = "white"
-
-        btn_style = f"""
-            QToolButton {{
-                font-weight: bold;
-                font-size: 14pt;
-                border: 2px solid transparent;   /* 默认透明边框 */
-                border-radius: 6px;
-                color: {base_color};
-                padding: 4px;
-            }}
-            QToolButton:hover {{
-                border: 2px solid #00BFFF;       /* 悬停时亮蓝色边框 */
-                background: rgba(0, 191, 255, 30);
-            }}
-            QToolButton:pressed {{
-                border: 2px solid #FF4500;       /* 按下时橙色边框 */
-                background: rgba(255, 69, 0, 40);
-            }}
-        """
-        self.pin_btn.setStyleSheet(btn_style)
-        self.close_all_btn.setStyleSheet(btn_style)
-
-    class ToolButton(QtWidgets.QToolButton):
-        def enterEvent(self, event):
-            if self.toolTip():
-                QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self.toolTip(), self)
-            super().enterEvent(event)
 
 
 # ========== 管理器 ==========
@@ -529,8 +644,8 @@ def main():
     QtWidgets.QToolTip.setFont(QtGui.QFont("Microsoft YaHei", 9))
     app.setStyleSheet("""
         QToolTip {
-            color: white;                /* 文字颜色 */
-            background-color: rgba(50, 50, 50, 220);  /* 背景色 */
+            color: white;
+            background-color: rgba(50, 50, 50, 220);
             border: 1px solid white;
             font: 10pt "Microsoft YaHei";
         }

@@ -1,0 +1,23 @@
+[project]
+name = "toast-notification"
+version = "0.0.2"
+description = "A cross-platform toast notification application built with PySide6"
+readme = "README.md"
+requires-python = ">=3.9,<3.13"
+license = { text = "MIT" }
+
+dependencies = [
+    "PySide6==6.7.3",
+]
+
+[dependency-groups]
+dev = []
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+toast = "toast:main"
+
+
