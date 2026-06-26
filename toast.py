@@ -7,6 +7,10 @@ from PySide6 import QtCore, QtWidgets, QtGui, QtNetwork
 # ========== 内置多语言支持 ==========
 from PySide6.QtCore import QLocale
 
+# 新建项目环境改用：
+# uv venv --seed
+# --seed 参数会自动预装 pip、setuptools，后续 pyside6-deploy、pyinstaller 这类打包工具就不会缺 pip。
+
 # pyside6 版本： pip install pyside6==6.7.3 | 6.7.3版本适用于Windows Server 2016
 # 部署命令 pyside6-deploy .\toast.py
 

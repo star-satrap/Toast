@@ -8,7 +8,7 @@ title = Toast
 project_dir = .
 
 # source file path
-input_file = E:\MyCode\Python\Toast\toast.py
+input_file = E:\MyCode\Project\Toast\toast.py
 
 # directory where exec is stored
 exec_directory = .
@@ -22,7 +22,7 @@ icon = E:\MyCode\Python\toast_python\DM.ico
 [python]
 
 # python path
-python_path = E:\MyCode\Python\toast_python\.venv\Scripts\python.exe
+python_path = E:\MyCode\Project\Toast\.venv\Scripts\python.exe
 
 # python packages to install
 packages = Nuitka==2.4.8
@@ -40,7 +40,7 @@ qml_files =
 excluded_qml_plugins = 
 
 # qt modules used. comma separated
-modules = Widgets,Network,Gui,Core
+modules = Gui,Widgets,Network,Core
 
 # qt plugins used by the application
 plugins = networkaccess,tls,styles,platforms,platforms/darwin,platforminputcontexts,generic,platformthemes,networkinformation,accessiblebridge,egldeviceintegrations,iconengines,imageformats,xcbglintegrations
@@ -69,9 +69,9 @@ mode = onefile
 # (str) specify any extra nuitka arguments
 extra_args = --quiet --noinclude-qt-translations --windows-console-mode=disable ^
 	--product-name="Toast App" ^
-	--file-version="0.1.0" ^
-	--product-version="0.1.0" ^
-	--copyright="Copyright KEN 2025"
+	--file-version="0.0.2" ^
+	--product-version="0.0.2" ^
+	--copyright="Copyright KEN 2026"
 
 [buildozer]
 

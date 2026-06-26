@@ -26,3 +26,12 @@ Thumbs.db
 
 # Project specific
 *.spec
+
+# Nuitka deployment
+dist/
+build/
+deployment/
+Toast.exe
+Toast.dist/
+Toast.dist.zip
+nuitka-crash-report.xml
