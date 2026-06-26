@@ -545,8 +545,8 @@ class ToastContainer(QtWidgets.QWidget):
         delay = (self._stagger_count - 1) * 60
 
         def _start_entry_anim():
-            # 动画开始后归零错峰计数
-            self._stagger_count = 0
+            # 动画启动后递减错峰计数（追踪待动画数量）
+            self._stagger_count -= 1
             toast._entering = True
             toast.show()
             toast.setWindowOpacity(0.0)
