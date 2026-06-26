@@ -8,6 +8,10 @@ from PySide6 import QtCore, QtWidgets, QtGui, QtNetwork
 # ========== 内置多语言支持 ==========
 from PySide6.QtCore import QLocale
 
+# 新建项目环境改用：
+# uv venv --seed
+# --seed 参数会自动预装 pip、setuptools，后续 pyside6-deploy、pyinstaller 这类打包工具就不会缺 pip。
+
 # pyside6 版本： pip install pyside6==6.7.3 | 6.7.3版本适用于Windows Server 2016
 # 部署命令 pyside6-deploy .\toast.py
 
@@ -35,11 +39,48 @@ STRINGS = {
     "minutes": {"en": "m ", "zh": "分钟"},
     "seconds": {"en": "s", "zh": "秒钟"},
     "expired_label": {"en": "Expired", "zh": "已过期"},
+    "expired_history_tooltip": {"en": "Expired history", "zh": "已过期记录"},
+    "expired_history_empty": {"en": "No expired records", "zh": "暂无过期记录"},
 }
 
 
 def tr(key: str) -> str:
     return STRINGS.get(key, {}).get(LANG, key)
+
+
+# ========== 到期历史数据结构 ==========
+class ExpiredRecord:
+    """单条过期记录（内存维护，不持久化）"""
+    __slots__ = ("title", "message", "created_at", "expired_at")
+
+    def __init__(self, title: str, message: str, created_at: float, expired_at: float):
+        self.title = title
+        self.message = message
+        self.created_at = created_at
+        self.expired_at = expired_at
+
+
+class ExpiredHistory:
+    """FIFO 过期记录集合，最大 100 条"""
+    MAX_RECORDS = 100
+
+    def __init__(self):
+        self._records = []
+
+    def add(self, record: ExpiredRecord):
+        self._records.append(record)
+        # FIFO 淘汰
+        if len(self._records) > self.MAX_RECORDS:
+            self._records.pop(0)
+
+    def all(self):
+        return list(self._records)
+
+    def count(self):
+        return len(self._records)
+
+    def clear(self):
+        self._records.clear()
 
 
 # ========== 自定义按钮基类 ==========
@@ -175,14 +216,211 @@ class LedPinButton(ToolButton):
             painter.drawEllipse(QtCore.QPointF(cx, cy), radius + 2, radius + 2)
 
 
+# ========== 展开/折叠按钮（▼ / ▶） ==========
+class ExpandCollapseButton(ToolButton):
+    """QPainter 自绘三角箭头：展开 ▼ 折叠 ▶"""
+    def __init__(self, theme="dark"):
+        super().__init__()
+        self.theme = theme
+        self.expanded = False
+        self._hovered = False
+        self.setMinimumSize(22, 22)
+        self.setMaximumSize(22, 22)
+        self.setCheckable(False)
+
+    def set_expanded(self, expanded: bool):
+        self.expanded = expanded
+        self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        # 透明背景（容器统一着色）
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+
+        # hover 时圆角背景
+        if self._hovered:
+            painter.setBrush(QtGui.QColor(255, 255, 255, 30))
+            painter.drawRoundedRect(rect, 4, 4)
+
+        # 三角箭头颜色
+        arrow_color = QtGui.QColor(220, 220, 220) if self.theme != "light" else QtGui.QColor(60, 60, 60)
+        if self._hovered:
+            arrow_color = arrow_color.lighter(130)
+        painter.setBrush(QtGui.QBrush(arrow_color))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+
+        cx = rect.width() / 2
+        cy = rect.height() / 2
+        s = 4  # 半边长
+
+        if self.expanded:
+            # ▼ 向下三角
+            tri = QtGui.QPolygon([
+                QtCore.QPoint(int(cx - s), int(cy - s / 2)),
+                QtCore.QPoint(int(cx + s), int(cy - s / 2)),
+                QtCore.QPoint(int(cx), int(cy + s)),
+            ])
+        else:
+            # ▶ 向右三角
+            tri = QtGui.QPolygon([
+                QtCore.QPoint(int(cx - s / 2), int(cy - s)),
+                QtCore.QPoint(int(cx + s), int(cy)),
+                QtCore.QPoint(int(cx - s / 2), int(cy + s)),
+            ])
+        painter.drawPolygon(tri)
+
+
+# ========== 到期历史面板 ==========
+class ExpiredHistoryPanel(QtWidgets.QWidget):
+    """折叠式过期记录列表（QScrollArea 内嵌）"""
+
+    def __init__(self, theme="dark"):
+        super().__init__()
+        self.theme = theme
+        self._records = []
+
+        # 外层 QVBoxLayout：内含一个 QScrollArea
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.scroll = QtWidgets.QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # 内容容器
+        self.content = QtWidgets.QWidget()
+        self.content_layout = QtWidgets.QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(6, 4, 6, 4)
+        self.content_layout.setSpacing(2)
+        self.content_layout.addStretch()
+
+        self.scroll.setWidget(self.content)
+        outer.addWidget(self.scroll)
+
+        self._apply_theme_style()
+
+    def _apply_theme_style(self):
+        """opacity 0.7 透明背景，文字颜色比正常 toast 稍暗"""
+        if self.theme == "light":
+            bg = "rgba(240,240,240,179)"   # 0.7 * 255 ≈ 179
+            text_color = "#666"
+            scroll_bg = "rgba(220,220,220,160)"
+        else:
+            bg = "rgba(20,20,20,179)"
+            text_color = "#888"
+            scroll_bg = "rgba(30,30,30,160)"
+
+        self.setStyleSheet(f"""
+            ExpiredHistoryPanel {{
+                background: {bg};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                color: {text_color};
+                background: transparent;
+                font-size: 9pt;
+            }}
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background: {scroll_bg};
+                width: 8px;
+                border-radius: 4px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {text_color};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {text_color};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+        """)
+
+    def set_records(self, records):
+        """刷新记录列表（最新在前）"""
+        # 清空旧条目
+        while self.content_layout.count() > 1:
+            item = self.content_layout.takeAt(0)
+            w = item.widget() if item else None
+            if w is not None:
+                w.deleteLater()
+
+        # 倒序展示：最新过期在最上方
+        self._records = list(reversed(records))
+
+        if not self._records:
+            empty = QtWidgets.QLabel(tr("expired_history_empty"))
+            empty.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.content_layout.insertWidget(0, empty)
+            return
+
+        for rec in self._records:
+            row = self._build_row(rec)
+            self.content_layout.insertWidget(self.content_layout.count() - 1, row)
+
+    def _build_row(self, rec: ExpiredRecord) -> QtWidgets.QWidget:
+        row = QtWidgets.QFrame()
+        row_layout = QtWidgets.QHBoxLayout(row)
+        row_layout.setContentsMargins(4, 2, 4, 2)
+        row_layout.setSpacing(6)
+
+        # 标题（加粗，≤20 字符）
+        title_text = (rec.title or "").strip()[:20]
+        # 消息摘要（≤30 字符）
+        msg_text = (rec.message or "").strip()[:30]
+        left_text = f"<b>{title_text}</b> | {msg_text}"
+        left_lbl = QtWidgets.QLabel(left_text)
+        left_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        left_lbl.setStyleSheet("background: transparent;")
+        # 右侧时间 HH:MM:SS
+        time_str = time.strftime("%H:%M:%S", time.localtime(rec.expired_at))
+        time_lbl = QtWidgets.QLabel(time_str)
+        time_lbl.setStyleSheet("background: transparent;")
+
+        row_layout.addWidget(left_lbl, 1)
+        row_layout.addWidget(time_lbl, 0)
+        return row
+
+
 # ========== 单个通知 ==========
 class Toast(QtWidgets.QFrame):
     closed = QtCore.Signal(object)
     remaining_changed = QtCore.Signal()
+    expired = QtCore.Signal(object)  # 进入 EXPIRED 阶段时发射（携带 self）
 
     def __init__(self, title, message, duration=3000, show_countdown=False, theme="dark"):
         super().__init__()
         self.setObjectName("toast")
+        self.title = title or tr("default_title")
+        self.message = message or tr("default_message")
+        self.created_at = time.time()
         self.duration = duration
         self.remaining = max(1, duration // 1000)
         self.show_countdown = show_countdown
@@ -197,9 +435,11 @@ class Toast(QtWidgets.QFrame):
 
         # 右滑关闭手势状态（Windows 平板触摸适配）
         self._drag = None
+        self._drag_direction = None    # None | "horizontal" | "vertical" 方向锁
         self._slide_back_anim = None
         self._swipe_threshold = 0.5
         self._fling_velocity = 600.0
+        self._direction_lock_threshold = 10  # 锁定方向的距离阈值
 
         # 动画状态标记
         self._exiting = False
@@ -327,6 +567,8 @@ class Toast(QtWidgets.QFrame):
         self.setStyleSheet(self._expired_style)
         # 5 秒后自动出场
         QtCore.QTimer.singleShot(5000, self.start_exit_anim)
+        # 通知管理器记录过期（phase 切换瞬间）
+        self.expired.emit(self)
         self.remaining_changed.emit()
 
     def _update_countdown(self):
@@ -388,7 +630,16 @@ class Toast(QtWidgets.QFrame):
         self.closed.emit(self)
         self.deleteLater()
 
-    # ========== 右滑关闭手势（触摸跟手） ==========
+    # ========== 右滑关闭手势（触摸跟手 + 方向锁） ==========
+    def _find_scroll_area(self):
+        """向上查找祖先 QScrollArea（用于垂直滚动方向）"""
+        p = self.parent()
+        while p is not None:
+            if isinstance(p, QtWidgets.QScrollArea):
+                return p
+            p = p.parent()
+        return None
+
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton and self._drag is None:
             gp = event.globalPosition().toPoint()
@@ -396,44 +647,88 @@ class Toast(QtWidgets.QFrame):
                 "start_global": gp,
                 "origin_geo": self.geometry(),
                 "last_x": gp.x(),
+                "last_y": gp.y(),
+                "init_scroll": self._get_scroll_value(),
                 "last_time": time.perf_counter(),
                 "velocity": 0.0,
                 "moved": False,
             }
+            self._drag_direction = None
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._drag:
             gp = event.globalPosition().toPoint()
             delta = gp - self._drag["start_global"]
-            dx = max(0, delta.x())
-            if dx > 2:
-                self._drag["moved"] = True
-            self.setGeometry(self._drag["origin_geo"].translated(dx, 0))
-            now = time.perf_counter()
-            dt = now - self._drag["last_time"]
-            if dt > 0:
-                inst = (gp.x() - self._drag["last_x"]) / dt
-                self._drag["velocity"] = 0.6 * inst + 0.4 * self._drag["velocity"]
-            self._drag["last_time"] = now
-            self._drag["last_x"] = gp.x()
+
+            # 方向锁定：首次位移超过阈值时锁定方向
+            if self._drag_direction is None:
+                dist = max(abs(delta.x()), abs(delta.y()))
+                if dist >= self._direction_lock_threshold:
+                    if abs(delta.y()) > abs(delta.x()):
+                        self._drag_direction = "vertical"
+                    else:
+                        self._drag_direction = "horizontal"
+
+            if self._drag_direction == "vertical":
+                # 垂直方向 → 交给父 QScrollArea 处理滚动
+                dy = gp.y() - self._drag["last_y"]
+                self._scroll_by(-dy)
+                self._drag["last_y"] = gp.y()
+                self._drag["moved"] = True  # 标记已处理，避免 press 误触发按钮
+                return  # 不调用 super，避免布局/位置干扰
+
+            if self._drag_direction == "horizontal":
+                dx = max(0, delta.x())
+                if dx > 2:
+                    self._drag["moved"] = True
+                self.setGeometry(self._drag["origin_geo"].translated(dx, 0))
+                now = time.perf_counter()
+                dt = now - self._drag["last_time"]
+                if dt > 0:
+                    inst = (gp.x() - self._drag["last_x"]) / dt
+                    self._drag["velocity"] = 0.6 * inst + 0.4 * self._drag["velocity"]
+                self._drag["last_time"] = now
+                self._drag["last_x"] = gp.x()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self._drag and self._drag.get("moved"):
+            # 垂直滚动方向：无需关闭 toast
+            if self._drag_direction == "vertical":
+                self._drag = None
+                self._drag_direction = None
+                return
+            # 水平方向：根据阈值/速度判定是否关闭
             origin_x = self._drag["origin_geo"].x()
             offset = self.geometry().x() - origin_x
             velocity = self._drag["velocity"]
             width = self.width() or 1
             if offset >= width * self._swipe_threshold or velocity >= self._fling_velocity:
                 self._drag = None
+                self._drag_direction = None
                 self.start_exit_anim()
                 return
             self._animate_back_to(self._drag["origin_geo"])
             self._drag = None
+            self._drag_direction = None
             return
         self._drag = None
+        self._drag_direction = None
         super().mouseReleaseEvent(event)
+
+    def _get_scroll_value(self):
+        sa = self._find_scroll_area()
+        if sa is None:
+            return 0
+        return sa.verticalScrollBar().value()
+
+    def _scroll_by(self, dy):
+        sa = self._find_scroll_area()
+        if sa is None:
+            return
+        bar = sa.verticalScrollBar()
+        bar.setValue(bar.value() + int(dy))
 
     def _animate_back_to(self, geo):
         self._slide_back_anim = QtCore.QPropertyAnimation(self, b"geometry", self)
@@ -446,11 +741,12 @@ class Toast(QtWidgets.QFrame):
 
 # ========== 容器 ==========
 class ToastContainer(QtWidgets.QWidget):
-    def __init__(self, theme="dark"):
+    def __init__(self, theme="dark", no_expired_history=False):
         super().__init__(None, QtCore.Qt.WindowType.Tool | QtCore.Qt.WindowType.FramelessWindowHint |
                          QtCore.Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.theme = theme
+        self.no_expired_history = no_expired_history
         self.pinned = True
         self.margin = 50
         self.screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -460,6 +756,11 @@ class ToastContainer(QtWidgets.QWidget):
         # 批量插入错峰计数
         self._stagger_count = 0
         self._insert_counter = 0
+
+        # 到期列表状态
+        self._history_expanded = False
+        self.history_panel = None
+        self._height_anim = None  # 容器高度过渡动画
 
         # 初始位置（靠右上）
         init_h = 120
@@ -474,6 +775,13 @@ class ToastContainer(QtWidgets.QWidget):
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.setContentsMargins(4, 4, 4, 3)
         toolbar.setSpacing(4)
+
+        # 到期历史按钮（位于 pin_btn 左侧）—— 禁用时不创建
+        if not self.no_expired_history:
+            self.history_btn = ExpandCollapseButton(theme=theme)
+            self.history_btn.setToolTip(tr("expired_history_tooltip"))
+            self.history_btn.clicked.connect(self.toggle_expired_history)
+            toolbar.addWidget(self.history_btn)
 
         self.pin_btn = LedPinButton(theme=theme)
         self.pin_btn.setToolTip(tr("pin_tooltip_pin"))
@@ -506,6 +814,70 @@ class ToastContainer(QtWidgets.QWidget):
 
         self.show()
         self.setWindowOpacity(TOAST_OPACITY)
+
+    def toggle_expired_history(self):
+        """展开/折叠到期列表"""
+        if self.no_expired_history:
+            return
+        self._history_expanded = not self._history_expanded
+
+        if self._history_expanded:
+            if self.history_panel is None:
+                self.history_panel = ExpiredHistoryPanel(theme=self.theme)
+                self.root.addWidget(self.history_panel)
+            else:
+                self.history_panel.setVisible(True)
+        else:
+            if self.history_panel is not None:
+                self.history_panel.setVisible(False)
+
+        if self.history_btn:
+            self.history_btn.set_expanded(self._history_expanded)
+
+        self.adjust_height()
+
+    def refresh_expired_history(self, records):
+        """刷新到期历史面板内容（展开时可见）"""
+        if self.no_expired_history or self.history_panel is None:
+            return
+        self.history_panel.set_records(records)
+        # 已展开状态下，刷新可能导致内容高度变化
+        if self._history_expanded:
+            self.adjust_height()
+
+    def _apply_scrollbar_style(self):
+        """为主滚动条应用主题样式"""
+        if self.scroll is None:
+            return
+        if self.theme == "light":
+            handle = "#999"
+            bg = "rgba(220,220,220,160)"
+        else:
+            handle = "#888"
+            bg = "rgba(30,30,30,160)"
+        self.scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{
+                background: {bg};
+                width: 8px;
+                border-radius: 4px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {handle};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {handle};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+        """)
 
     def toggle_pin(self):
         self.pinned = not self.pinned
@@ -545,8 +917,9 @@ class ToastContainer(QtWidgets.QWidget):
         delay = (self._stagger_count - 1) * 60
 
         def _start_entry_anim():
-            # 动画启动后递减错峰计数（追踪待动画数量）
-            self._stagger_count -= 1
+            # 注：错峰计数在动画完成时递减（见 _on_entry_finished），
+            # 不能在启动时递减，否则 processEvents() 提前触发 singleShot(0)
+            # 会导致后续 toast 的 delay 计算偏小，错峰失效。
             toast._entering = True
             toast.show()
             toast.setWindowOpacity(0.0)
@@ -571,7 +944,13 @@ class ToastContainer(QtWidgets.QWidget):
 
             anim_group.addAnimation(fade_anim)
             anim_group.addAnimation(slide_anim)
-            anim_group.finished.connect(lambda: setattr(toast, '_entering', False))
+
+            # 动画完成时：清除入场标记 + 递减错峰计数
+            def _on_entry_finished():
+                toast._entering = False
+                self._stagger_count -= 1
+            anim_group.finished.connect(_on_entry_finished)
+
             anim_group.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
             toast._fade_anim = anim_group
 
@@ -658,21 +1037,16 @@ class ToastContainer(QtWidgets.QWidget):
         return 0  # 保持原有相对顺序（stable sort）
 
     def adjust_height(self):
-        safe_max = self.max_height - 20
-        fixed_height = safe_max
-
-        x = self.screen.right() - self.width - self.margin
-        y = self.screen.top() + self.margin
-
-        self.resize(self.width, fixed_height)
-        self.move(x, y)
-
+        """容器高度自适应内容：高度 = min(sum_toast_h + history + toolbar, 屏幕可用高度)
+        高度变化用 150ms QPropertyAnimation 平滑过渡"""
+        # 1) 懒初始化 QScrollArea
         if not self.scroll:
             self.root.removeWidget(self.container)
             self.scroll = QtWidgets.QScrollArea()
             self.scroll.setWidgetResizable(True)
             self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
             self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.scroll.setWidget(self.container)
             self.root.addWidget(self.scroll)
             self.scroll.setMinimumWidth(self.width)
@@ -681,27 +1055,100 @@ class ToastContainer(QtWidgets.QWidget):
             scrollbar_w = self.scroll.verticalScrollBar().sizeHint().width()
             self.scroll.setFixedWidth(self.width + scrollbar_w)
             self.container.setFixedWidth(self.width)
+            self._apply_scrollbar_style()
 
-        toolbar_h = self.pin_btn.sizeHint().height() + 8
-        self.scroll.setMinimumHeight(fixed_height - toolbar_h)
-        self.scroll.setMaximumHeight(fixed_height - toolbar_h)
+        # 2) 计算各部分高度
+        toolbar_h = self.pin_btn.sizeHint().height() + 11  # 上下边距 8+3
+        margins_h = 4 + 4 + 3  # root 上下边距 + spacing
+
+        # toast 内容高度之和
+        sum_toast_h = 0
+        for i in range(self.vbox.count() - 1):  # 跳过末尾 stretch
+            item = self.vbox.itemAt(i)
+            w = item.widget() if item else None
+            if w is not None:
+                hint = w.sizeHint().height()
+                if hint <= 0:
+                    hint = w.height()
+                sum_toast_h += hint
+        # 加上 vbox 间距
+        n_toasts = max(0, self.vbox.count() - 1)
+        sum_toast_h += 4 + 6 + n_toasts * 6  # vbox 上下边距 + 间距
+
+        # 到期列表区域高度
+        history_h = 0
+        if self._history_expanded and self.history_panel is not None:
+            max_history_h = int(self.max_height * 0.3)  # 容器可用空间的 30%
+            content_hint = self.history_panel.sizeHint().height()
+            history_h = min(max_history_h, max(60, content_hint))
+
+        # 3) 容器目标高度
+        target_h = toolbar_h + sum_toast_h + history_h + margins_h
+        # 上限 = 屏幕可用高度 - 2 * margin
+        safe_max = self.max_height
+        target_h = min(target_h, safe_max)
+        target_h = max(target_h, toolbar_h + 40)  # 最小高度
+
+        # 4) QScrollArea 高度（不超过内容所需）
+        scroll_h = max(40, target_h - toolbar_h - history_h - margins_h)
+        self.scroll.setMinimumHeight(scroll_h)
+        self.scroll.setMaximumHeight(scroll_h)
+
+        # 5) 到期列表高度
+        if self.history_panel is not None:
+            if history_h > 0:
+                self.history_panel.setMaximumHeight(history_h)
+                self.history_panel.setMinimumHeight(min(history_h, 60))
+
+        # 6) 用 QPropertyAnimation 平滑过渡容器几何（150ms）
+        x = self.screen.right() - self.width - self.margin
+        y = self.screen.top() + self.margin
+        target_geo = QtCore.QRect(x, y, self.width, target_h)
+
+        # 终止正在进行的动画（DeleteWhenStopped 可能已删除 C++ 对象）
+        if self._height_anim is not None:
+            try:
+                self._height_anim.stop()
+            except RuntimeError:
+                pass
+            self._height_anim = None
+
+        anim = QtCore.QPropertyAnimation(self, b"geometry", self)
+        anim.setDuration(150)
+        anim.setStartValue(QtCore.QRect(self.geometry()))
+        anim.setEndValue(target_geo)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        # 动画自然结束时清理 Python 引用，避免悬挂指针
+        anim.finished.connect(lambda: self._clear_height_anim(anim))
+        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._height_anim = anim
+
+    def _clear_height_anim(self, anim):
+        """动画结束时清理引用，避免访问已删除的 C++ 对象"""
+        if self._height_anim is anim:
+            self._height_anim = None
 
 
 # ========== 管理器 ==========
 class ToastManager(QtCore.QObject):
     all_closed = QtCore.Signal()
 
-    def __init__(self, theme="dark"):
+    def __init__(self, theme="dark", no_expired_history=False):
         super().__init__()
         self.toasts = []
         self.theme = theme
-        self.container = ToastContainer(theme=theme)
+        self.no_expired_history = no_expired_history
+        # 到期历史记录集合（仅内存维护，不持久化）
+        self.expired_history = None if no_expired_history else ExpiredHistory()
+        self.container = ToastContainer(theme=theme, no_expired_history=no_expired_history)
 
     def show_toast(self, title, message, duration=3000, show_countdown=False):
         try:
             toast = Toast(title, message, duration, show_countdown, theme=self.theme)
             toast.closed.connect(self._on_closed)
             toast.remaining_changed.connect(self._on_remaining_changed)
+            if not self.no_expired_history:
+                toast.expired.connect(self._on_toast_expired)
             self.toasts.append(toast)
             self.container.add_toast(toast)
         except Exception as e:
@@ -716,6 +1163,20 @@ class ToastManager(QtCore.QObject):
 
     def _on_remaining_changed(self):
         self.container.reorder_toasts()
+
+    def _on_toast_expired(self, toast):
+        """Toast 进入 EXPIRED 阶段时记录到历史"""
+        if self.no_expired_history or self.expired_history is None:
+            return
+        rec = ExpiredRecord(
+            title=toast.title,
+            message=toast.message,
+            created_at=toast.created_at,
+            expired_at=toast.expired_time or time.time(),
+        )
+        self.expired_history.add(rec)
+        # 刷新面板（如已展开）
+        self.container.refresh_expired_history(self.expired_history.all())
 
 
 # ========== 本地服务端 ==========
@@ -788,6 +1249,8 @@ def main():
                         help="Show a countdown timer inside each toast")
     parser.add_argument("--theme", choices=["light", "dark"], default="dark",
                         help="Select theme (default: dark)")
+    parser.add_argument("--no-expired-history", action="store_true",
+                        help="Disable expired history list (no button, no recording)")
 
     args = parser.parse_args()
 
@@ -814,7 +1277,7 @@ def main():
     if send_message(payload):
         return
 
-    mgr = ToastManager(theme=args.theme)
+    mgr = ToastManager(theme=args.theme, no_expired_history=args.no_expired_history)
     srv = LocalServer()
     srv.message.connect(lambda p: mgr.show_toast(
         p.get("title", "Notification"),
