@@ -242,11 +242,15 @@ class ExpiredSummaryRow(QtWidgets.QWidget):
             self._color_empty = "#aaa"
             self._bar_has = QtGui.QColor(255, 140, 0)       # 橙色
             self._bar_empty = QtGui.QColor(204, 204, 204)   # 灰色
+            self._bg_normal = QtGui.QColor(245, 245, 245, 180)   # 浅灰底
+            self._bg_hover = QtGui.QColor(235, 235, 235, 220)    # hover 加深
         else:
-            self._color_has = "#ccc"
-            self._color_empty = "#555"
+            self._color_has = "#ddd"
+            self._color_empty = "#666"
             self._bar_has = QtGui.QColor(255, 165, 0)       # 橙色
             self._bar_empty = QtGui.QColor(68, 68, 68)     # 灰色
+            self._bg_normal = QtGui.QColor(30, 30, 30, 180)      # 深灰底
+            self._bg_hover = QtGui.QColor(45, 45, 45, 220)       # hover 加深
         self.update()
 
     def set_count(self, count: int):
@@ -275,16 +279,18 @@ class ExpiredSummaryRow(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         rect = self.rect()
 
-        # 背景透明
+        # 圆角背景填充（hover 时加深，增强可点击感）
+        bg = self._bg_hover if self._hovered else self._bg_normal
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        painter.drawRect(rect)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 4, 4)
 
-        # 左侧竖条（2px 宽）
+        # 左侧竖条（3px 宽，加粗增强视觉关联）
         bar_color = self._bar_has if self._count > 0 else self._bar_empty
         painter.setBrush(bar_color)
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.drawRect(QtCore.QRect(0, 2, 2, rect.height() - 4))
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(0, 3, 3, rect.height() - 6), 1.5, 1.5)
+        painter.drawPath(path)
 
         # 文字
         if self._count > 0:
@@ -295,15 +301,24 @@ class ExpiredSummaryRow(QtWidgets.QWidget):
             color = QtGui.QColor(self._color_empty)
 
         if self._hovered:
-            color = color.lighter(120)
+            color = color.lighter(130)
 
         painter.setPen(QtGui.QPen(color))
         font = QtGui.QFont("Microsoft YaHei", 9)
+        font.setBold(self._count > 0)
         painter.setFont(font)
-        text_rect = QtCore.QRect(8, 0, rect.width() - 12, rect.height())
+        text_rect = QtCore.QRect(10, 0, rect.width() - 30, rect.height())
         painter.drawText(text_rect,
                          QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
                          text)
+
+        # 右侧箭头提示（hover 时显示，暗示可展开）
+        if self._hovered and self._count > 0:
+            painter.setPen(QtGui.QPen(color, 1.5))
+            ax = rect.right() - 12
+            ay = rect.height() / 2
+            painter.drawLine(ax - 4, ay - 3, ax, ay)
+            painter.drawLine(ax, ay, ax - 4, ay + 3)
 
 
 # ========== 到期历史浮层（遮盖 toast 区域） ==========
