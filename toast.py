@@ -4,6 +4,15 @@ import sys
 import time
 from functools import cmp_to_key
 
+# Windows 平台原生鼠标状态检测（用于浮层点击外部关闭）
+try:
+    import ctypes
+    _user32 = ctypes.windll.user32
+    _VK_LBUTTON = 0x01
+except (ImportError, AttributeError):
+    _user32 = None
+    _VK_LBUTTON = 0
+
 from PySide6 import QtCore, QtWidgets, QtGui, QtNetwork
 from PySide6.QtCore import QLocale
 
@@ -385,6 +394,14 @@ class ExpiredOverlay(QtWidgets.QWidget):
         # 填充整个矩形，覆盖窗口默认白色表面
         painter.drawRect(self.rect())
 
+    def resizeEvent(self, event):
+        """窗口尺寸变化时裁剪为 8px 圆角矩形（与 ToastContainer 圆角风格一致）"""
+        super().resizeEvent(event)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(self.rect()), 8, 8)
+        polygon = path.toFillPolygon().toPolygon()
+        self.setMask(QtGui.QRegion(polygon))
+
     def _apply_theme_style(self):
         """主题滚动条样式"""
         if self.theme == "light":
@@ -569,11 +586,18 @@ class ExpiredOverlay(QtWidgets.QWidget):
         anim.setStartValue(self.windowOpacity())
         anim.setEndValue(0.0)
         anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
-        anim.finished.connect(self.hide)
-        # 动画结束后发射信号，让 ToastContainer 卸载事件过滤器
-        anim.finished.connect(self.overlay_hidden.emit)
+        # 合并为单个 slot：确保 hide() 失败也不影响 overlay_hidden 信号发射
+        anim.finished.connect(self._on_hide_anim_finished)
         anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         self._opacity_anim = anim
+
+    def _on_hide_anim_finished(self):
+        """hide_overlay 动画结束：隐藏窗口并发射 overlay_hidden 信号"""
+        try:
+            self.hide()
+        except RuntimeError:
+            pass
+        self.overlay_hidden.emit()
 
     def sizeHint(self):
         # 给一个合理的最小高度，防止被压缩到接近 0
@@ -768,12 +792,11 @@ class Toast(QtWidgets.QFrame):
             return
         self._exiting = True
 
-        # 记录当前几何，从布局中移除以避免动画冲突
+        # 记录当前几何，提到最上层做滑出动画
+        # 不在动画前 removeWidget，避免其他 toast 立即重排
+        # 真正的移除交给 _final_close → _on_closed → remove_toast
         current_geo = QtCore.QRect(self.geometry())
-        parent = self.parent()
-        if parent and parent.layout():
-            parent.layout().removeWidget(self)
-        self.setGeometry(current_geo)
+        self.raise_()
 
         # 终止位置：向右偏移自身宽度
         exit_geo = QtCore.QRect(current_geo)
@@ -934,6 +957,7 @@ class ToastContainer(QtWidgets.QWidget):
         self.summary_row = None
         self.overlay = None
         self._height_anim = None  # 容器高度过渡动画
+        self._outside_click_timer = None  # 浮层外部点击检测定时器
 
         # 初始位置（靠右上）
         init_h = 120
@@ -1034,32 +1058,83 @@ class ToastContainer(QtWidgets.QWidget):
         if self.overlay.is_click_locked():
             # 已锁定 → 关闭浮层，退出锁定
             self.overlay.set_click_locked(False)
+            self._stop_outside_click_detection()
             self._hide_overlay()
         else:
             # 未锁定 → 显示浮层，进入锁定
             self._show_overlay()
             self.overlay.set_click_locked(True)
+            self._start_outside_click_detection()
 
     def eventFilter(self, obj, event):
-        """浮层事件过滤器：click 锁定模式下检测点击位置
-        事件过滤器安装在 self.overlay 上，捕获浮层及其子 widget 传播上来的事件。
-        - 点击在摘要行范围内 → 放行（让摘要行 clicked 信号处理 toggle）
-        - 点击在浮层其他位置 → 关闭浮层，吃掉事件"""
-        if (self.overlay is not None and obj == self.overlay
-                and self.overlay.is_click_locked()
-                and event.type() == QtCore.QEvent.Type.MouseButtonPress):
-            if isinstance(event, QtGui.QMouseEvent):
-                gp = event.globalPosition().toPoint()
-                # 检查点击是否在摘要行范围内
-                if self.summary_row is not None:
-                    summary_local = self.summary_row.parent().mapFromGlobal(gp)
-                    if self.summary_row.geometry().contains(summary_local):
-                        return False  # 在摘要行内 → 放行（让摘要行 clicked 信号处理 toggle）
-                # 不在摘要行内 → 关闭浮层，退出锁定
-                self.overlay.set_click_locked(False)
-                self._hide_overlay()
-                return True  # 吃掉事件
+        """全局事件过滤器：click 锁定模式下检测 Qt 应用内的鼠标按下。
+        过滤器安装在 QApplication.instance() 上。
+        - 点击在摘要行范围内 → 放行（让摘要行 clicked 信号处理 toggle 关闭）
+        - 点击在浮层范围内 → 放行（让浮层正常处理滚动/子 widget 交互）
+        - 点击在 Qt 应用其他位置 → 关闭浮层，放行事件
+        注意：点击桌面/其他应用不经过 Qt 事件循环，由 _outside_click_timer 轮询检测。"""
+        if (self.overlay is not None and self.overlay.is_click_locked()
+                and event.type() == QtCore.QEvent.Type.MouseButtonPress
+                and isinstance(event, QtGui.QMouseEvent)):
+            gp = event.globalPosition().toPoint()
+            # 点击在摘要行内 → 放行（toggle 由 _on_summary_clicked 处理）
+            if self.summary_row is not None:
+                summary_local = self.summary_row.mapFromGlobal(gp)
+                if self.summary_row.rect().contains(summary_local):
+                    return False
+            # 点击在浮层内 → 放行（让浮层处理滚动等交互）
+            if self.overlay.isVisible():
+                overlay_local = self.overlay.mapFromGlobal(gp)
+                if self.overlay.rect().contains(overlay_local):
+                    return False
+            # 其他位置 → 关闭浮层，放行事件（不干扰目标 widget 响应）
+            self.overlay.set_click_locked(False)
+            self._hide_overlay()
+            return False
         return super().eventFilter(obj, event)
+
+    # ========== 浮层外部点击检测（Windows 原生轮询）==========
+    def _start_outside_click_detection(self):
+        """启动外部点击检测定时器（仅 click 锁定模式下使用）"""
+        if _user32 is None:
+            return  # 非 Windows 平台不启用
+        if self._outside_click_timer is None:
+            self._outside_click_timer = QtCore.QTimer(self)
+            self._outside_click_timer.setTimerType(
+                QtCore.Qt.TimerType.PreciseTimer)
+            self._outside_click_timer.timeout.connect(self._check_outside_click)
+        self._outside_click_timer.start(30)  # 30ms 轮询
+
+    def _stop_outside_click_detection(self):
+        """停止外部点击检测定时器"""
+        if self._outside_click_timer is not None:
+            self._outside_click_timer.stop()
+
+    def _check_outside_click(self):
+        """轮询检测鼠标左键是否在浮层和摘要行外按下。
+        使用 Windows API GetAsyncKeyState 获取全局鼠标状态，
+        不依赖 Qt 事件循环（可捕获桌面/其他应用的点击）。"""
+        if not self.overlay or not self.overlay.is_click_locked():
+            self._stop_outside_click_detection()
+            return
+        # 获取全局鼠标左键状态（不依赖 Qt 事件循环）
+        if not (_user32.GetAsyncKeyState(_VK_LBUTTON) & 0x8000):
+            return  # 左键未按下
+        # 左键按下，检查鼠标位置是否在浮层和摘要行外
+        pos = QtGui.QCursor.pos()
+        # 在浮层内 → 不关闭（让浮层处理交互）
+        if self.overlay.isVisible():
+            overlay_local = self.overlay.mapFromGlobal(pos)
+            if self.overlay.rect().contains(overlay_local):
+                return
+        # 在摘要行内 → 不关闭（让 clicked 信号处理 toggle）
+        if self.summary_row is not None:
+            summary_local = self.summary_row.mapFromGlobal(pos)
+            if self.summary_row.rect().contains(summary_local):
+                return
+        # 在外部按下 → 关闭浮层
+        self.overlay.set_click_locked(False)
+        self._hide_overlay()
 
     def _show_overlay(self):
         """显示浮层（同步尺寸后淡入）"""
@@ -1068,8 +1143,8 @@ class ToastContainer(QtWidgets.QWidget):
         if self._expired_count <= 0:
             return
         self._sync_overlay_geometry()
-        # 安装事件过滤器到浮层自身（捕获浮层及子 widget 传播上来的鼠标事件）
-        self.overlay.installEventFilter(self)
+        # 全局事件过滤器：捕获应用内任意位置的鼠标按下（桌面、其他 widget 等）
+        QtWidgets.QApplication.instance().installEventFilter(self)
         self.overlay.show_overlay()
 
     def _hide_overlay(self):
@@ -1079,9 +1154,10 @@ class ToastContainer(QtWidgets.QWidget):
         self.overlay.hide_overlay()
 
     def _on_overlay_hidden(self):
-        """浮层淡出动画结束后卸载事件过滤器"""
+        """浮层淡出动画结束后卸载全局事件过滤器"""
         if self.overlay is not None:
-            self.overlay.removeEventFilter(self)
+            QtWidgets.QApplication.instance().removeEventFilter(self)
+        self._stop_outside_click_detection()
 
     def _sync_overlay_geometry(self):
         """浮层独立顶层窗口定位：使用屏幕绝对坐标。
@@ -1401,11 +1477,19 @@ class ToastContainer(QtWidgets.QWidget):
         anim.setEndValue(target_geo)
         anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
         # 动画自然结束时清理 Python 引用，避免悬挂指针
-        anim.finished.connect(lambda: self._clear_height_anim(anim))
+        anim.finished.connect(lambda: self._on_height_anim_finished(anim))
         anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         self._height_anim = anim
 
         # 6) 同步浮层尺寸（如果可见）
+        if self.overlay is not None and self.overlay.isVisible():
+            self._sync_overlay_geometry()
+
+    def _on_height_anim_finished(self, anim):
+        """高度动画结束：清理引用，并追加一次浮层位置同步。
+        防止动画期间被 refresh_expired_history 等路径调用 _sync_overlay_geometry
+        时使用了动画中间值导致浮层位置偏差。"""
+        self._clear_height_anim(anim)
         if self.overlay is not None and self.overlay.isVisible():
             self._sync_overlay_geometry()
 
