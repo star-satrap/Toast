@@ -5,7 +5,6 @@ import time
 from functools import cmp_to_key
 
 from PySide6 import QtCore, QtWidgets, QtGui, QtNetwork
-# ========== 内置多语言支持 ==========
 from PySide6.QtCore import QLocale
 
 # 新建项目环境改用：
@@ -41,6 +40,7 @@ STRINGS = {
     "expired_label": {"en": "Expired", "zh": "已过期"},
     "expired_history_tooltip": {"en": "Expired history", "zh": "已过期记录"},
     "expired_history_empty": {"en": "No expired records", "zh": "暂无过期记录"},
+    "expired_summary": {"en": "Expired: {n}", "zh": "已过期：{n} 条"},
 }
 
 
@@ -216,84 +216,123 @@ class LedPinButton(ToolButton):
             painter.drawEllipse(QtCore.QPointF(cx, cy), radius + 2, radius + 2)
 
 
-# ========== 展开/折叠按钮（▼ / ▶） ==========
-class ExpandCollapseButton(ToolButton):
-    """QPainter 自绘三角箭头：展开 ▼ 折叠 ▶"""
+# ========== 到期摘要行（固定位置，始终可见） ==========
+class ExpiredSummaryRow(QtWidgets.QWidget):
+    """工具栏下方、toast 列表上方的固定摘要行
+    显示过期记录数量；hover/点击触发浮层。"""
+    hover_enter = QtCore.Signal()
+    hover_leave = QtCore.Signal()
+    clicked = QtCore.Signal()  # 点击摘要行（用于切换浮层）
+
     def __init__(self, theme="dark"):
         super().__init__()
         self.theme = theme
-        self.expanded = False
+        self._count = 0
         self._hovered = False
-        self.setMinimumSize(22, 22)
-        self.setMaximumSize(22, 22)
-        self.setCheckable(False)
+        self.setFixedHeight(24)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._apply_style()
 
-    def set_expanded(self, expanded: bool):
-        self.expanded = expanded
+    def sizeHint(self):
+        return QtCore.QSize(-1, 24)
+
+    def _apply_style(self):
+        if self.theme == "light":
+            self._color_has = "#333"
+            self._color_empty = "#aaa"
+            self._bar_has = QtGui.QColor(255, 140, 0)       # 橙色
+            self._bar_empty = QtGui.QColor(204, 204, 204)   # 灰色
+        else:
+            self._color_has = "#ccc"
+            self._color_empty = "#555"
+            self._bar_has = QtGui.QColor(255, 165, 0)       # 橙色
+            self._bar_empty = QtGui.QColor(68, 68, 68)     # 灰色
+        self.update()
+
+    def set_count(self, count: int):
+        self._count = count
         self.update()
 
     def enterEvent(self, event):
         self._hovered = True
         self.update()
+        self.hover_enter.emit()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hovered = False
         self.update()
+        self.hover_leave.emit()
         super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         rect = self.rect()
-        # 透明背景（容器统一着色）
+
+        # 背景透明
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
 
-        # hover 时圆角背景
-        if self._hovered:
-            painter.setBrush(QtGui.QColor(255, 255, 255, 30))
-            painter.drawRoundedRect(rect, 4, 4)
-
-        # 三角箭头颜色
-        arrow_color = QtGui.QColor(220, 220, 220) if self.theme != "light" else QtGui.QColor(60, 60, 60)
-        if self._hovered:
-            arrow_color = arrow_color.lighter(130)
-        painter.setBrush(QtGui.QBrush(arrow_color))
+        # 左侧竖条（2px 宽）
+        bar_color = self._bar_has if self._count > 0 else self._bar_empty
+        painter.setBrush(bar_color)
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.drawRect(QtCore.QRect(0, 2, 2, rect.height() - 4))
 
-        cx = rect.width() / 2
-        cy = rect.height() / 2
-        s = 4  # 半边长
-
-        if self.expanded:
-            # ▼ 向下三角
-            tri = QtGui.QPolygon([
-                QtCore.QPoint(int(cx - s), int(cy - s / 2)),
-                QtCore.QPoint(int(cx + s), int(cy - s / 2)),
-                QtCore.QPoint(int(cx), int(cy + s)),
-            ])
+        # 文字
+        if self._count > 0:
+            text = tr("expired_summary").replace("{n}", str(self._count))
+            color = QtGui.QColor(self._color_has)
         else:
-            # ▶ 向右三角
-            tri = QtGui.QPolygon([
-                QtCore.QPoint(int(cx - s / 2), int(cy - s)),
-                QtCore.QPoint(int(cx + s), int(cy)),
-                QtCore.QPoint(int(cx - s / 2), int(cy + s)),
-            ])
-        painter.drawPolygon(tri)
+            text = tr("expired_history_empty")
+            color = QtGui.QColor(self._color_empty)
+
+        if self._hovered:
+            color = color.lighter(120)
+
+        painter.setPen(QtGui.QPen(color))
+        font = QtGui.QFont("Microsoft YaHei", 9)
+        painter.setFont(font)
+        text_rect = QtCore.QRect(8, 0, rect.width() - 12, rect.height())
+        painter.drawText(text_rect,
+                         QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                         text)
 
 
-# ========== 到期历史面板 ==========
-class ExpiredHistoryPanel(QtWidgets.QWidget):
-    """折叠式过期记录列表（QScrollArea 内嵌）"""
+# ========== 到期历史浮层（遮盖 toast 区域） ==========
+class ExpiredOverlay(QtWidgets.QWidget):
+    """半透明遮罩浮层，覆盖 container 的 toast 区域
+    显示过期记录列表，支持 hover 宽限期和 click 锁定两种触发模式。"""
+    request_show = QtCore.Signal()
+    request_hide = QtCore.Signal()
+    overlay_hidden = QtCore.Signal()  # 淡出动画结束后发射，用于卸载事件过滤器
 
     def __init__(self, theme="dark"):
         super().__init__()
         self.theme = theme
         self._records = []
+        self._opacity_anim = None
+        # 触发模式
+        self._click_locked = False
+        self._hover_grace_timer = None
+        self._hover_active = False  # 鼠标是否在浮层内
 
-        # 外层 QVBoxLayout：内含一个 QScrollArea
+        # 浮层作为独立顶层窗口，初始隐藏
+        self.setVisible(False)
+        # WA_OpaquePaintEvent：告知 Qt 此 widget 在 paintEvent 中绘制全部区域，
+        # Qt 无需在 paintEvent 前填充默认背景色（白色）
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        # 顶层窗口使用 windowOpacity 控制透明度（避免 QGraphicsOpacityEffect 渲染白框）
+        self.setWindowOpacity(0.0)
+
+        # 主布局：QScrollArea 内含记录列表
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -304,39 +343,47 @@ class ExpiredHistoryPanel(QtWidgets.QWidget):
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        # 内容容器
         self.content = QtWidgets.QWidget()
         self.content_layout = QtWidgets.QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(6, 4, 6, 4)
-        self.content_layout.setSpacing(2)
+        self.content_layout.setContentsMargins(8, 4, 8, 4)
+        self.content_layout.setSpacing(1)
         self.content_layout.addStretch()
 
         self.scroll.setWidget(self.content)
+        # viewport 和 content 都不自动填充背景，让 paintEvent 背景透出
+        self.scroll.viewport().setAutoFillBackground(False)
+        self.content.setAutoFillBackground(False)
         outer.addWidget(self.scroll)
 
         self._apply_theme_style()
 
-    def _apply_theme_style(self):
-        """opacity 0.7 透明背景，文字颜色比正常 toast 稍暗"""
-        if self.theme == "light":
-            bg = "rgba(240,240,240,179)"   # 0.7 * 255 ≈ 179
-            text_color = "#666"
-            scroll_bg = "rgba(220,220,220,160)"
+    def paintEvent(self, event):
+        """手动绘制纯色背景（覆盖窗口默认白色表面）"""
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        if self.theme == "dark":
+            bg_color = QtGui.QColor("#1a1a1a")
         else:
-            bg = "rgba(20,20,20,179)"
-            text_color = "#888"
+            bg_color = QtGui.QColor("#f0f0f0")
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(bg_color)
+        # 填充整个矩形，覆盖窗口默认白色表面
+        painter.drawRect(self.rect())
+
+    def _apply_theme_style(self):
+        """主题滚动条样式"""
+        if self.theme == "light":
+            text_color = "#333"
+            separator = "rgba(0,0,0,20)"
+            scroll_bg = "rgba(220,220,220,160)"
+            handle = "#999"
+        else:
+            text_color = "#ddd"
+            separator = "rgba(255,255,255,20)"
             scroll_bg = "rgba(30,30,30,160)"
+            handle = "#888"
 
         self.setStyleSheet(f"""
-            ExpiredHistoryPanel {{
-                background: {bg};
-                border-radius: 8px;
-            }}
-            QLabel {{
-                color: {text_color};
-                background: transparent;
-                font-size: 9pt;
-            }}
             QScrollArea {{
                 background: transparent;
                 border: none;
@@ -348,12 +395,9 @@ class ExpiredHistoryPanel(QtWidgets.QWidget):
                 margin: 2px;
             }}
             QScrollBar::handle:vertical {{
-                background: {text_color};
+                background: {handle};
                 border-radius: 4px;
                 min-height: 20px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {text_color};
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
@@ -362,51 +406,165 @@ class ExpiredHistoryPanel(QtWidgets.QWidget):
                 background: transparent;
             }}
         """)
+        self._text_color = text_color
+        self._separator = separator
 
     def set_records(self, records):
-        """刷新记录列表（最新在前）"""
-        # 清空旧条目
+        """刷新记录列表（最新过期在最上方，倒序）"""
+        # 清空旧条目（保留末尾 stretch）
         while self.content_layout.count() > 1:
             item = self.content_layout.takeAt(0)
             w = item.widget() if item else None
             if w is not None:
                 w.deleteLater()
 
-        # 倒序展示：最新过期在最上方
         self._records = list(reversed(records))
 
         if not self._records:
             empty = QtWidgets.QLabel(tr("expired_history_empty"))
             empty.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(f"color: {self._text_color}; background: transparent; font-size: 9pt;")
             self.content_layout.insertWidget(0, empty)
             return
 
+        # 选择等宽字体
+        mono_font = self._pick_mono_font()
         for rec in self._records:
-            row = self._build_row(rec)
+            row = self._build_row(rec, mono_font)
             self.content_layout.insertWidget(self.content_layout.count() - 1, row)
 
-    def _build_row(self, rec: ExpiredRecord) -> QtWidgets.QWidget:
+    def _pick_mono_font(self):
+        """优先使用 Consolas / Courier New，否则用默认字体"""
+        font_families = QtGui.QFontDatabase.families()
+        for candidate in ("Consolas", "Courier New", "DejaVu Sans Mono"):
+            if any(c == candidate for c in font_families):
+                return QtGui.QFont(candidate, 9)
+        return QtGui.QFont("Microsoft YaHei", 9)
+
+    def _build_row(self, rec: ExpiredRecord, mono_font: QtGui.QFont) -> QtWidgets.QWidget:
         row = QtWidgets.QFrame()
+        row.setObjectName("overlayRow")
+        row.setStyleSheet(f"""
+            QFrame#overlayRow {{
+                border-bottom: 1px solid {self._separator};
+                background: transparent;
+            }}
+        """)
         row_layout = QtWidgets.QHBoxLayout(row)
-        row_layout.setContentsMargins(4, 2, 4, 2)
-        row_layout.setSpacing(6)
+        row_layout.setContentsMargins(2, 2, 2, 2)
+        row_layout.setSpacing(12)
 
-        # 标题（加粗，≤20 字符）
+        # 左侧：开始时间 ~ 到期时间（等宽）
+        start_str = time.strftime("%H:%M:%S", time.localtime(rec.created_at))
+        end_str = time.strftime("%H:%M:%S", time.localtime(rec.expired_at))
+        time_text = f"{start_str} ~ {end_str}"
+        time_lbl = QtWidgets.QLabel(time_text)
+        time_lbl.setFont(mono_font)
+        time_lbl.setStyleSheet(f"color: {self._text_color}; background: transparent;")
+
+        # 右侧：标题加粗 + " | " + 消息摘要（≤40 字符）
         title_text = (rec.title or "").strip()[:20]
-        # 消息摘要（≤30 字符）
-        msg_text = (rec.message or "").strip()[:30]
-        left_text = f"<b>{title_text}</b> | {msg_text}"
-        left_lbl = QtWidgets.QLabel(left_text)
-        left_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        left_lbl.setStyleSheet("background: transparent;")
-        # 右侧时间 HH:MM:SS
-        time_str = time.strftime("%H:%M:%S", time.localtime(rec.expired_at))
-        time_lbl = QtWidgets.QLabel(time_str)
-        time_lbl.setStyleSheet("background: transparent;")
+        msg_text = (rec.message or "").strip()[:40]
+        desc_text = f"<b>{title_text}</b> | {msg_text}"
+        desc_lbl = QtWidgets.QLabel(desc_text)
+        desc_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        desc_lbl.setStyleSheet(f"color: {self._text_color}; background: transparent; font-size: 8.5pt;")
 
-        row_layout.addWidget(left_lbl, 1)
         row_layout.addWidget(time_lbl, 0)
+        row_layout.addWidget(desc_lbl, 1)
         return row
+
+    # ========== 触发与关闭 ==========
+    def enterEvent(self, event):
+        # 鼠标进入浮层 → 取消宽限期定时器，保持显示
+        self._hover_active = True
+        if self._hover_grace_timer is not None:
+            self._hover_grace_timer.stop()
+            self._hover_grace_timer = None
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        # 鼠标离开浮层 → 若非 click 锁定则关闭
+        self._hover_active = False
+        if not self._click_locked:
+            self.request_hide.emit()
+        super().leaveEvent(event)
+
+    def start_hover_grace(self):
+        """摘要行 hover_leave 时调用，启动 250ms 宽限期"""
+        if self._click_locked:
+            return
+        if self._hover_grace_timer is not None:
+            self._hover_grace_timer.stop()
+        self._hover_grace_timer = QtCore.QTimer(self)
+        self._hover_grace_timer.setSingleShot(True)
+        self._hover_grace_timer.setInterval(250)
+        self._hover_grace_timer.timeout.connect(lambda: self._on_grace_timeout())
+        self._hover_grace_timer.start()
+
+    def cancel_hover_grace(self):
+        """摘要行 hover_enter 时调用，取消宽限期"""
+        if self._hover_grace_timer is not None:
+            self._hover_grace_timer.stop()
+            self._hover_grace_timer = None
+
+    def _on_grace_timeout(self):
+        """宽限期结束，鼠标未进入浮层 → 关闭"""
+        self._hover_grace_timer = None
+        if not self._hover_active and not self._click_locked:
+            self.request_hide.emit()
+
+    def set_click_locked(self, locked: bool):
+        self._click_locked = locked
+
+    def is_click_locked(self) -> bool:
+        return self._click_locked
+
+    # ========== 出现/消失动画 ==========
+    def show_overlay(self):
+        if self.isVisible() and self.windowOpacity() >= 0.99:
+            return
+        self.show()
+        self.raise_()
+        if self._opacity_anim is not None:
+            try:
+                self._opacity_anim.stop()
+            except RuntimeError:
+                pass
+            self._opacity_anim = None
+        anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
+        anim.setDuration(150)
+        anim.setStartValue(self.windowOpacity())
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._opacity_anim = anim
+
+    def hide_overlay(self):
+        if not self.isVisible():
+            return
+        if self._opacity_anim is not None:
+            try:
+                self._opacity_anim.stop()
+            except RuntimeError:
+                pass
+            self._opacity_anim = None
+        anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
+        anim.setDuration(100)
+        anim.setStartValue(self.windowOpacity())
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
+        anim.finished.connect(self.hide)
+        # 动画结束后发射信号，让 ToastContainer 卸载事件过滤器
+        anim.finished.connect(self.overlay_hidden.emit)
+        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._opacity_anim = anim
+
+    def sizeHint(self):
+        # 给一个合理的最小高度，防止被压缩到接近 0
+        h = max(120, super().sizeHint().height())
+        w = max(260, super().sizeHint().width())
+        return QtCore.QSize(w, h)
 
 
 # ========== 单个通知 ==========
@@ -757,10 +915,9 @@ class ToastContainer(QtWidgets.QWidget):
         self._stagger_count = 0
         self._insert_counter = 0
 
-        # 到期列表状态
-        self._history_expanded = False
-        self.history_panel = None
-        self.history_btn = None  # 防御性初始化（no_expired_history=True 时不创建按钮）
+        # 到期列表：摘要行 + 浮层（no_expired_history=True 时不创建）
+        self.summary_row = None
+        self.overlay = None
         self._height_anim = None  # 容器高度过渡动画
 
         # 初始位置（靠右上）
@@ -777,13 +934,6 @@ class ToastContainer(QtWidgets.QWidget):
         toolbar.setContentsMargins(4, 4, 4, 3)
         toolbar.setSpacing(4)
 
-        # 到期历史按钮（位于 pin_btn 左侧）—— 禁用时不创建
-        if not self.no_expired_history:
-            self.history_btn = ExpandCollapseButton(theme=theme)
-            self.history_btn.setToolTip(tr("expired_history_tooltip"))
-            self.history_btn.clicked.connect(self.toggle_expired_history)
-            toolbar.addWidget(self.history_btn)
-
         self.pin_btn = LedPinButton(theme=theme)
         self.pin_btn.setToolTip(tr("pin_tooltip_pin"))
         self.pin_btn.clicked.connect(self.toggle_pin)
@@ -796,18 +946,41 @@ class ToastContainer(QtWidgets.QWidget):
         toolbar.addWidget(self.close_all_btn)
         toolbar.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
-        # container
+        # container（toast 列表）
         self.container = QtWidgets.QWidget()
         self.vbox = QtWidgets.QVBoxLayout(self.container)
         self.vbox.setContentsMargins(6, 4, 6, 6)
         self.vbox.setSpacing(6)
         self.vbox.addStretch()
 
-        # root 布局
+        # root 布局：[toolbar] + [summary_row] + [container/scroll]
         self.root = QtWidgets.QVBoxLayout(self)
         self.root.setContentsMargins(4, 4, 4, 4)
         self.root.setSpacing(3)
         self.root.addLayout(toolbar)
+
+        # 摘要行（始终固定可见，位于 toolbar 和 container 之间）
+        if not self.no_expired_history:
+            self.summary_row = ExpiredSummaryRow(theme=theme)
+            self.summary_row.hover_enter.connect(self._on_summary_hover_enter)
+            self.summary_row.hover_leave.connect(self._on_summary_hover_leave)
+            self.summary_row.clicked.connect(self._on_summary_clicked)
+            self.root.addWidget(self.summary_row)
+
+            # 浮层（独立顶层窗口，不受容器高度裁剪）
+            self.overlay = ExpiredOverlay(theme=theme)
+            self.overlay.setParent(None)
+            self.overlay.setWindowFlags(
+                QtCore.Qt.WindowType.Tool |
+                QtCore.Qt.WindowType.FramelessWindowHint |
+                QtCore.Qt.WindowType.WindowStaysOnTopHint
+            )
+            # self.overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.overlay.request_show.connect(self._show_overlay)
+            self.overlay.request_hide.connect(self._hide_overlay)
+            # 浮层淡出结束后卸载事件过滤器
+            self.overlay.overlay_hidden.connect(self._on_overlay_hidden)
+
         self.root.addWidget(self.container)
 
         self.scroll = None
@@ -816,35 +989,135 @@ class ToastContainer(QtWidgets.QWidget):
         self.show()
         self.setWindowOpacity(TOAST_OPACITY)
 
-    def toggle_expired_history(self):
-        """展开/折叠到期列表"""
-        if self.no_expired_history:
+    # ========== 到期列表触发逻辑 ==========
+    def _on_summary_hover_enter(self):
+        """鼠标进入摘要行：若非 click 锁定则显示浮层"""
+        if self.no_expired_history or self.overlay is None:
             return
-        self._history_expanded = not self._history_expanded
+        if self.overlay.is_click_locked():
+            return  # click 锁定时 hover 不响应
+        # 取消宽限期（如果有）
+        self.overlay.cancel_hover_grace()
+        # 仅当有记录时才显示浮层
+        if self._expired_count > 0:
+            self._show_overlay()
 
-        if self._history_expanded:
-            if self.history_panel is None:
-                self.history_panel = ExpiredHistoryPanel(theme=self.theme)
-                self.root.addWidget(self.history_panel)
-            else:
-                self.history_panel.setVisible(True)
+    def _on_summary_hover_leave(self):
+        """鼠标离开摘要行：启动 250ms 宽限期"""
+        if self.no_expired_history or self.overlay is None:
+            return
+        if self.overlay.is_click_locked():
+            return
+        self.overlay.start_hover_grace()
+
+    def _on_summary_clicked(self):
+        """点击摘要行：切换 click 锁定模式"""
+        if self.no_expired_history or self.overlay is None:
+            return
+        if self._expired_count <= 0:
+            return  # 无记录时不响应
+        if self.overlay.is_click_locked():
+            # 已锁定 → 关闭浮层，退出锁定
+            self.overlay.set_click_locked(False)
+            self._hide_overlay()
         else:
-            if self.history_panel is not None:
-                self.history_panel.setVisible(False)
+            # 未锁定 → 显示浮层，进入锁定
+            self._show_overlay()
+            self.overlay.set_click_locked(True)
 
-        if self.history_btn:
-            self.history_btn.set_expanded(self._history_expanded)
+    def eventFilter(self, obj, event):
+        """浮层事件过滤器：click 锁定模式下检测点击位置
+        事件过滤器安装在 self.overlay 上，捕获浮层及其子 widget 传播上来的事件。
+        - 点击在摘要行范围内 → 放行（让摘要行 clicked 信号处理 toggle）
+        - 点击在浮层其他位置 → 关闭浮层，吃掉事件"""
+        if (self.overlay is not None and obj == self.overlay
+                and self.overlay.is_click_locked()
+                and event.type() == QtCore.QEvent.Type.MouseButtonPress):
+            if isinstance(event, QtGui.QMouseEvent):
+                gp = event.globalPosition().toPoint()
+                # 检查点击是否在摘要行范围内
+                if self.summary_row is not None:
+                    summary_local = self.summary_row.parent().mapFromGlobal(gp)
+                    if self.summary_row.geometry().contains(summary_local):
+                        return False  # 在摘要行内 → 放行（让摘要行 clicked 信号处理 toggle）
+                # 不在摘要行内 → 关闭浮层，退出锁定
+                self.overlay.set_click_locked(False)
+                self._hide_overlay()
+                return True  # 吃掉事件
+        return super().eventFilter(obj, event)
 
-        self.adjust_height()
+    def _show_overlay(self):
+        """显示浮层（同步尺寸后淡入）"""
+        if self.no_expired_history or self.overlay is None:
+            return
+        if self._expired_count <= 0:
+            return
+        self._sync_overlay_geometry()
+        # 安装事件过滤器到浮层自身（捕获浮层及子 widget 传播上来的鼠标事件）
+        self.overlay.installEventFilter(self)
+        self.overlay.show_overlay()
+
+    def _hide_overlay(self):
+        """隐藏浮层（淡出）"""
+        if self.no_expired_history or self.overlay is None:
+            return
+        self.overlay.hide_overlay()
+
+    def _on_overlay_hidden(self):
+        """浮层淡出动画结束后卸载事件过滤器"""
+        if self.overlay is not None:
+            self.overlay.removeEventFilter(self)
+
+    def _sync_overlay_geometry(self):
+        """浮层独立顶层窗口定位：使用屏幕绝对坐标。
+        浮层左上角与容器左边缘对齐，y = 摘要行底部 + spacing。
+        高度 = min(300, max(120, 屏幕可用空间))。"""
+        if self.overlay is None:
+            return
+        # 起始 y（容器局部坐标）：摘要行底部 + spacing
+        if self.summary_row is not None:
+            local_y = self.summary_row.geometry().bottom() + self.root.spacing()
+        else:
+            # 防御性处理：无摘要行时从 container 顶部开始
+            target = self.scroll if self.scroll is not None else self.container
+            local_y = target.geometry().y() if target else 0
+
+        # 转换为屏幕绝对坐标
+        overlay_y = self.mapToGlobal(QtCore.QPoint(0, local_y)).y()
+        # x = 容器左边缘（屏幕绝对 x）
+        overlay_x = self.geometry().x()
+
+        # 可用空间
+        available_h = self.screen.bottom() - self.margin - overlay_y
+        overlay_h = max(120, min(300, available_h))
+        overlay_w = self.width
+
+        self.overlay.setGeometry(overlay_x, overlay_y, overlay_w, overlay_h)
+        self.overlay.raise_()
+
+    @property
+    def _expired_count(self):
+        """当前过期记录数量（由 ToastManager 维护并通过 refresh_expired_history 更新）"""
+        return getattr(self, '_expired_count_value', 0)
+
+    @_expired_count.setter
+    def _expired_count(self, value):
+        self._expired_count_value = value
 
     def refresh_expired_history(self, records):
-        """刷新到期历史面板内容（展开时可见）"""
-        if self.no_expired_history or self.history_panel is None:
+        """刷新到期历史：更新摘要行数字 + 浮层记录列表"""
+        if self.no_expired_history:
             return
-        self.history_panel.set_records(records)
-        # 已展开状态下，刷新可能导致内容高度变化
-        if self._history_expanded:
-            self.adjust_height()
+        count = len(records)
+        self._expired_count = count
+        if self.summary_row is not None:
+            self.summary_row.set_count(count)
+        if self.overlay is not None:
+            self.overlay.set_records(records)
+            # 如果浮层当前可见，刷新内容（无需调整容器高度，浮层是覆盖式的）
+            # 但需要同步尺寸以防 container 尺寸变化
+            if self.overlay.isVisible():
+                self._sync_overlay_geometry()
 
     def _apply_scrollbar_style(self):
         """为主滚动条应用主题样式"""
@@ -893,6 +1166,10 @@ class ToastContainer(QtWidgets.QWidget):
         self.setWindowFlags(flags)
         self.show()
         self.setWindowOpacity(TOAST_OPACITY)
+        # toggle_pin 会触发 hide + show，浮层为独立窗口需重新同步层级
+        if self.overlay is not None and self.overlay.isVisible():
+            self._sync_overlay_geometry()
+            self.overlay.raise_()
 
     def add_toast(self, toast):
         # 设置插入顺序
@@ -1038,8 +1315,8 @@ class ToastContainer(QtWidgets.QWidget):
         return 0  # 保持原有相对顺序（stable sort）
 
     def adjust_height(self):
-        """容器高度自适应内容：高度 = min(sum_toast_h + history + toolbar, 屏幕可用高度)
-        高度变化用 150ms QPropertyAnimation 平滑过渡"""
+        """容器高度自适应内容：高度 = min(toolbar + summary + sum_toast_h, 屏幕可用高度)
+        高度变化用 150ms QPropertyAnimation 平滑过渡。浮层尺寸同步覆盖 container。"""
         # 1) 懒初始化 QScrollArea
         if not self.scroll:
             self.root.removeWidget(self.container)
@@ -1060,6 +1337,8 @@ class ToastContainer(QtWidgets.QWidget):
 
         # 2) 计算各部分高度
         toolbar_h = self.pin_btn.sizeHint().height() + 11  # 上下边距 8+3
+        # 摘要行高度（固定 24px，禁用时为 0）
+        summary_h = self.summary_row.sizeHint().height() if self.summary_row is not None else 0
         margins_h = 4 + 4 + 3  # root 上下边距 + spacing
 
         # toast 内容高度之和
@@ -1076,32 +1355,19 @@ class ToastContainer(QtWidgets.QWidget):
         n_toasts = max(0, self.vbox.count() - 1)
         sum_toast_h += 4 + 6 + n_toasts * 6  # vbox 上下边距 + 间距
 
-        # 到期列表区域高度
-        history_h = 0
-        if self._history_expanded and self.history_panel is not None:
-            max_history_h = int(self.max_height * 0.3)  # 容器可用空间的 30%
-            content_hint = self.history_panel.sizeHint().height()
-            history_h = min(max_history_h, max(60, content_hint))
-
-        # 3) 容器目标高度
-        target_h = toolbar_h + sum_toast_h + history_h + margins_h
+        # 3) 容器目标高度 = toolbar + summary + scroll内容 + margins
+        target_h = toolbar_h + summary_h + sum_toast_h + margins_h
         # 上限 = 屏幕可用高度 - 2 * margin
         safe_max = self.max_height
         target_h = min(target_h, safe_max)
-        target_h = max(target_h, toolbar_h + 40)  # 最小高度
+        target_h = max(target_h, toolbar_h + summary_h + 40)  # 最小高度
 
         # 4) QScrollArea 高度（不超过内容所需）
-        scroll_h = max(40, target_h - toolbar_h - history_h - margins_h)
+        scroll_h = max(40, target_h - toolbar_h - summary_h - margins_h)
         self.scroll.setMinimumHeight(scroll_h)
         self.scroll.setMaximumHeight(scroll_h)
 
-        # 5) 到期列表高度
-        if self.history_panel is not None:
-            if history_h > 0:
-                self.history_panel.setMaximumHeight(history_h)
-                self.history_panel.setMinimumHeight(min(history_h, 60))
-
-        # 6) 用 QPropertyAnimation 平滑过渡容器几何（150ms）
+        # 5) 用 QPropertyAnimation 平滑过渡容器几何（150ms）
         x = self.screen.right() - self.width - self.margin
         y = self.screen.top() + self.margin
         target_geo = QtCore.QRect(x, y, self.width, target_h)
@@ -1123,6 +1389,10 @@ class ToastContainer(QtWidgets.QWidget):
         anim.finished.connect(lambda: self._clear_height_anim(anim))
         anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         self._height_anim = anim
+
+        # 6) 同步浮层尺寸（如果可见）
+        if self.overlay is not None and self.overlay.isVisible():
+            self._sync_overlay_geometry()
 
     def _clear_height_anim(self, anim):
         """动画结束时清理引用，避免访问已删除的 C++ 对象"""
