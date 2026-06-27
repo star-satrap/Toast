@@ -69,8 +69,8 @@ mode = onefile
 # (str) specify any extra nuitka arguments
 extra_args = --quiet --noinclude-qt-translations --windows-console-mode=disable ^
 	--product-name="Toast App" ^
-	--file-version="0.0.2" ^
-	--product-version="0.0.2" ^
+	--file-version="0.0.3" ^
+	--product-version="0.0.3" ^
 	--copyright="Copyright KEN 2026"
 
 [buildozer]
