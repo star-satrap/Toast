@@ -4,7 +4,6 @@ import sys
 import time
 from functools import cmp_to_key
 
-# Windows 平台原生鼠标状态检测（用于浮层点击外部关闭）
 try:
     import ctypes
     _user32 = ctypes.windll.user32
