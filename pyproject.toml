@@ -1,6 +1,6 @@
 [project]
 name = "toast-notification"
-version = "0.0.3"
+version = "0.0.4"
 description = "A cross-platform toast notification application built with PySide6"
 readme = "README.md"
 requires-python = ">=3.9,<3.13"
