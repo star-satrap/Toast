@@ -35,3 +35,6 @@ Toast.exe
 Toast.dist/
 Toast.dist.zip
 nuitka-crash-report.xml
+
+# Trae
+.Trae/

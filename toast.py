@@ -341,6 +341,8 @@ class ExpiredOverlay(QtWidgets.QWidget):
         super().__init__()
         self.theme = theme
         self._records = []
+        self._pending_records = []
+        self._dirty = False
         self._opacity_anim = None
         # 触发模式
         self._click_locked = False
@@ -450,6 +452,8 @@ class ExpiredOverlay(QtWidgets.QWidget):
                 w.deleteLater()
 
         self._records = list(reversed(records))
+        self._pending_records = list(records)
+        self._dirty = False
 
         if not self._records:
             empty = QtWidgets.QLabel(tr("expired_history_empty"))
@@ -555,6 +559,9 @@ class ExpiredOverlay(QtWidgets.QWidget):
     def show_overlay(self):
         if self.isVisible() and self.windowOpacity() >= 0.99:
             return
+        # 显示前若有待刷新记录，重建 UI 行
+        if self._dirty and self._pending_records is not None:
+            self.set_records(self._pending_records)
         self.show()
         self.raise_()
         if self._opacity_anim is not None:
@@ -734,7 +741,11 @@ class Toast(QtWidgets.QFrame):
             self._timer.start(1000)
         else:
             # 非倒计时 toast：duration 到期直接出场
-            QtCore.QTimer.singleShot(self.duration, self.start_exit_anim)
+            # 父子化 timer：toast 被删除时自动停止，避免回调访问已删除 C++ 对象
+            self._exit_timer = QtCore.QTimer(self)
+            self._exit_timer.setSingleShot(True)
+            self._exit_timer.timeout.connect(self.start_exit_anim)
+            self._exit_timer.start(self.duration)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -761,8 +772,11 @@ class Toast(QtWidgets.QFrame):
         # 视觉变化
         self.countdown_lbl.setText(tr("expired_label"))
         self.setStyleSheet(self._expired_style)
-        # 5 秒后自动出场
-        QtCore.QTimer.singleShot(5000, self.start_exit_anim)
+        # 5 秒后自动出场（父子化 timer，toast 删除时自动停止）
+        self._expired_exit_timer = QtCore.QTimer(self)
+        self._expired_exit_timer.setSingleShot(True)
+        self._expired_exit_timer.timeout.connect(self.start_exit_anim)
+        self._expired_exit_timer.start(5000)
         # 通知管理器记录过期（phase 切换瞬间）
         self.expired.emit(self)
         self.remaining_changed.emit()
@@ -1203,11 +1217,15 @@ class ToastContainer(QtWidgets.QWidget):
         if self.summary_row is not None:
             self.summary_row.set_count(count)
         if self.overlay is not None:
-            self.overlay.set_records(records)
-            # 如果浮层当前可见，刷新内容（无需调整容器高度，浮层是覆盖式的）
-            # 但需要同步尺寸以防 container 尺寸变化
             if self.overlay.isVisible():
+                # 浮层可见时立即重建行
+                self.overlay.set_records(records)
                 self._sync_overlay_geometry()
+            else:
+                # 浮层不可见：仅缓存记录，show_overlay 时再重建
+                # 避免 100 轮 toast 过期导致 100×100 次 widget 创建/销毁
+                self.overlay._pending_records = list(records)
+                self.overlay._dirty = True
 
     def _apply_scrollbar_style(self):
         """为主滚动条应用主题样式"""
@@ -1324,10 +1342,20 @@ class ToastContainer(QtWidgets.QWidget):
 
         self.adjust_height()
         QtWidgets.QApplication.processEvents()
-        QtCore.QTimer.singleShot(delay, _start_entry_anim)
+
+        # 父子化 timer：toast 被删除时自动停止，避免回调访问已删除 C++ 对象
+        entry_timer = QtCore.QTimer(toast)
+        entry_timer.setSingleShot(True)
+        entry_timer.timeout.connect(_start_entry_anim)
+        entry_timer.start(delay)
+        toast._entry_timer = entry_timer
 
         # 入场后触发排序（延迟到入场动画启动后）
-        QtCore.QTimer.singleShot(delay + 50, self.reorder_toasts)
+        reorder_timer = QtCore.QTimer(toast)
+        reorder_timer.setSingleShot(True)
+        reorder_timer.timeout.connect(self.reorder_toasts)
+        reorder_timer.start(delay + 50)
+        toast._reorder_timer = reorder_timer
 
     def remove_toast(self, toast):
         self.vbox.removeWidget(toast)
@@ -1584,6 +1612,7 @@ class LocalServer(QtCore.QObject):
                 print(f"解析消息失败: {e}, 内容: {line}")
 
         socket.disconnectFromServer()
+        socket.deleteLater()
 
 
 # ========== 客户端发送函数 ==========
